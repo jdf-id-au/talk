@@ -18,7 +18,8 @@
                                                    TextWebSocketFrame)
            (io.netty.handler.codec.http HttpServerCodec HttpObjectAggregator)
            (io.netty.channel.group DefaultChannelGroup)
-           (io.netty.util.concurrent GlobalEventExecutor)))
+           (io.netty.util.concurrent GlobalEventExecutor)
+           (io.netty.handler.codec.http.websocketx.extensions.compression WebSocketServerCompressionHandler)))
 
 (s/def ::port (s/int-in 1024 65535))
 (s/def ::max-frame-size (s/int-in 1024 (* 1024 1024)))
@@ -44,15 +45,16 @@
         ; TODO could add selectively according to need
         (.addLast "http" (HttpServerCodec.))
         (.addLast "http-agg" (HttpObjectAggregator. (* 64 1024)))
+        ;(.addLast "ws-compr" (WebSocketServerCompressionHandler.))
         (.addLast "ws" (WebSocketServerProtocolHandler.
                          path nil false max-frame-size 10000 ; compiler can't find static field??:
                          #_WebSocketServerProtocolConfig/DEFAULT_HANDSHAKE_TIMEOUT_MILLIS))
         (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
-        (.addLast "ws-handler" (ws/handler channel-group clients in))
+        (.addLast "http-handler" (http/handler path))
+        (.addLast "ws-handler" (ws/handler channel-group clients in))))))
         ; TODO per message deflate?
         ; HttpContentEncoder HttpContentDecoder
         ; HttpContentCompressor HttpContentDecompressor
-        (.addLast "http-handler" (http/handler))))))
 
 (defn server!
   "Bootstrap a Netty server connected to core.async channels:
@@ -84,14 +86,15 @@
                     #_(log/debug "about to write" (count msg) "characters to"
                         (.remoteAddress ch) "on channel id" (.id ch))
                     (let [cf (.writeAndFlush ch (TextWebSocketFrame. msg))]
-                      (.addListener cf (proxy [ChannelFutureListener] []
-                                         (operationComplete [f]
-                                           (when (.isCancelled f)
-                                             (log/info "Cancelled message" msg "to" id))
-                                           (when-not (.isSuccess f)
-                                             (log/error "Send error for " msg "to" id
-                                               (.cause f)))
-                                           (take! out post)))))
+                      (.addListener cf
+                        (reify ChannelFutureListener
+                          (operationComplete [_ f]
+                            (when (.isCancelled f)
+                              (log/info "Cancelled message" msg "to" id))
+                            (when-not (.isSuccess f)
+                              (log/error "Send error for " msg "to" id
+                                (.cause f)))
+                            (take! out post)))))
                     (log/info "Dropped outgoing message because websocket is closed"
                       id (get @clients id) msg))
                   (log/info "Stopped sending messages")))
@@ -103,9 +106,9 @@
                             (.channel NioServerSocketChannel)
                             (.localAddress ^int (InetSocketAddress. port))
                             (.childHandler (pipeline path opts channel-group clients in)))
-                server-cf (.bind bootstrap)]
+                server-cf (-> bootstrap .bind .sync)] ; sync casuse binding to fail here rather than later
             {:close (fn [] (close! out)
-                      (some-> server-cf .sync .channel .close .sync)
+                      (some-> server-cf .channel .close .sync)
                       (-> channel-group .close .sync)
                       (close! in)
                       (-> loop-group .shutdownGracefully)) ; could/should add .sync; makes tests slower
