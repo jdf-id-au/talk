@@ -3,7 +3,8 @@
             [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close!]]
             [talk.http :as http]
             [talk.ws :as ws]
-            [hato.websocket :as hws])
+            [hato.websocket :as hws]
+            [clojure.spec.alpha :as s])
   (:import (io.netty.bootstrap ServerBootstrap)
            (io.netty.channel ChannelInitializer
                              ChannelId)
@@ -18,6 +19,17 @@
            (io.netty.handler.codec.http HttpServerCodec HttpObjectAggregator)
            (io.netty.channel.group DefaultChannelGroup)
            (io.netty.util.concurrent GlobalEventExecutor)))
+
+(s/def ::port (s/int-in 1024 65535))
+(s/def ::max-frame-size (s/int-in 1024 (* 1024 1024)))
+(s/def ::max-message-size (s/int-in 1024 (* 10 1024 1024)))
+(s/def ::buffer (s/int-in 1 1024))
+(s/def ::in-buffer ::buffer)
+(s/def ::out-buffer ::buffer)
+(s/def ::opts (s/keys :opt-un [::max-frame-size
+                               ::max-message-size
+                               ::in-buffer
+                               ::out-buffer]))
 
 (defn pipeline
   [^String path {:keys [^int max-frame-size max-message-size]
@@ -43,7 +55,11 @@
 
 (defn server!
   ([port] (server! port "/" nil))
-  ([port path opts]
+  ([port path {:keys [in-buffer out-buffer]
+               :or {in-buffer 1 out-buffer 1}
+               :as opts}]
+   {:pre [(s/valid? ::port port)
+          (s/valid? ::opts opts)]}
    (let [; TODO look at aleph for epoll, thread number specification
          loop-group (NioEventLoopGroup.)
          ; single threaded executor is for group actions
@@ -51,8 +67,8 @@
          ; channel-group tracks channels but is not flexible enough for client metadata
          ; therefore store metadata in parallel atom:
          clients (atom {})
-         in (chan)
-         out (chan)
+         in (chan in-buffer)
+         out (chan out-buffer)
          _ (go-loop []
              (if-let [[^ChannelId id ^String msg] (<! out)] ; TODO validate
                (let [ch (.find channel-group id)]

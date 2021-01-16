@@ -38,7 +38,7 @@
         ; http://cdn.cognitect.com/presentations/2014/insidechannels.pdf
         ; https://github.com/loganpowell/cljs-guides/blob/master/src/guides/core-async-basics.md
         ; https://clojure.org/guides/core_async_go
-        (when-not (>!! in [id text])
+        (when-not (>!! in [id text]) ; `>!!` rather than `put!` may reveal need for buffering on `in`
           (log/error "Dropped incoming message because in chan is closed" text))))
     (exceptionCaught [^ChannelHandlerContext ctx
                       ^Throwable cause]
