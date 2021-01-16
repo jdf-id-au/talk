@@ -1,6 +1,6 @@
 (ns talk.api
   (:require [clojure.tools.logging :as log]
-            [clojure.core.async :as async :refer [go-loop chan <!! <! >! put! close!]]
+            [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close!]]
             [talk.http :as http]
             [talk.ws :as ws]
             [hato.websocket :as hws])
@@ -101,7 +101,7 @@
         ws @(hws/websocket uri
               {:on-message
                (fn [ws frame last?]
-                 (when-not (put! raw-in [frame last?])
+                 (when-not (>!! raw-in [frame last?])
                    (log/error "Dropped incoming message because aggregator chan is closed" frame)))
                :on-close
                (fn [ws status reason]
