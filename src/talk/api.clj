@@ -9,17 +9,17 @@
            (io.netty.channel ChannelInitializer
                              ChannelId ChannelFutureListener)
            (io.netty.channel.nio NioEventLoopGroup)
-           (io.netty.channel.group ChannelGroup)
+           (io.netty.channel.group ChannelGroup DefaultChannelGroup)
            (io.netty.channel.socket SocketChannel)
            (io.netty.channel.socket.nio NioServerSocketChannel)
+           (io.netty.util.concurrent GlobalEventExecutor)
            (java.net InetSocketAddress)
+           (io.netty.handler.codec.http HttpServerCodec HttpObjectAggregator)
            (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler
                                                    WebSocketFrameAggregator
                                                    TextWebSocketFrame)
-           (io.netty.handler.codec.http HttpServerCodec HttpObjectAggregator)
-           (io.netty.channel.group DefaultChannelGroup)
-           (io.netty.util.concurrent GlobalEventExecutor)
-           (io.netty.handler.codec.http.websocketx.extensions.compression WebSocketServerCompressionHandler)))
+           (io.netty.handler.codec.http.websocketx.extensions.compression
+             WebSocketServerCompressionHandler)))
 
 (s/def ::port (s/int-in 1024 65535))
 (s/def ::max-frame-size (s/int-in 1024 (* 1024 1024)))
@@ -50,7 +50,7 @@
                          ws-path nil true max-frame-size 10000)) ; compiler can't find static field??:
                          ;WebSocketServerProtocolConfig/DEFAULT_HANDSHAKE_TIMEOUT_MILLIS))
         (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
-        (.addLast "http-handler" (http/handler nil))
+        (.addLast "http-handler" (http/handler nil)) ; TODO pass through routing info
         (.addLast "ws-handler" (ws/handler channel-group clients in))))))
         ; TODO per message deflate?
         ; HttpContentEncoder HttpContentDecoder
@@ -78,6 +78,7 @@
          clients (atom {})
          in (chan in-buffer)
          out (chan out-buffer)
+         ;pub (async/pub in )
          ; Want outgoing messages to queue up in `out` chan rather than Netty,
          ; so use ChannelFutureListener to drain `out` with backpressure:
          post (fn post [val]
@@ -120,6 +121,7 @@
             (log/error "Unable to bootstrap server" e)
             (throw e))))))
 
+; TODO move hato dep to dev-only; just have client adaptor
 (defn client!
   [uri]
   (let [raw-in (chan)

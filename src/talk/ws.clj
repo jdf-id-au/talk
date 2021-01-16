@@ -34,6 +34,8 @@
         (.fireChannelActive ctx)))
     (channelRead0 [^ChannelHandlerContext ctx
                    ^WebSocketFrame frame]
+      ; facilitate backpressure on subsequent reads; requires (.read ch) see branches below
+      (-> ctx .channel .config (.setAutoRead false))
       (if (instance? TextWebSocketFrame frame)
         (let [ch (.channel ctx)
               id (.id ch)
@@ -46,9 +48,15 @@
           ; put! will throw AssertionError if >1024 requests queue up
           ; Netty prefers async everywhere, which is why I'm not using >!!
           ; TODO learn how to adjust autoRead to express backpressure (only ws not http...).
-          (when-not (put! in [id text])
+          (when-not (put! in [id text]
+                      (fn [val]
+                        (if val
+                          (.read ch) ; because autoRead is false
+                          (log/error "Dropped incoming message because in chan is closed (put! callback)"))))
             (log/error "Dropped incoming message because in chan is closed" text)))
-        (log/info "Dropped incoming message because not text")))
+            ; TODO do something about closed in chan? Shutdown?
+        (do (log/info "Dropped incoming message because not text")
+            (.read ch))))
     (exceptionCaught [^ChannelHandlerContext ctx
                       ^Throwable cause]
       (condp instance? cause

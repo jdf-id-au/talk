@@ -10,3 +10,7 @@
                (when-not (boolean? msg)
                  (>! (s :out) [id (str "heard you: " msg)]))
                (recur (<! (s :in)))))
+
+; API sketch
+#_ (def s (talk/server! 8125))
+            
