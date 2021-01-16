@@ -1,13 +1,13 @@
 (ns talk.api
   (:require [clojure.tools.logging :as log]
-            [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close!]]
+            [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! take! put! close!]]
             [talk.http :as http]
             [talk.ws :as ws]
             [hato.websocket :as hws]
             [clojure.spec.alpha :as s])
   (:import (io.netty.bootstrap ServerBootstrap)
            (io.netty.channel ChannelInitializer
-                             ChannelId)
+                             ChannelId ChannelFutureListener)
            (io.netty.channel.nio NioEventLoopGroup)
            (io.netty.channel.group ChannelGroup)
            (io.netty.channel.socket SocketChannel)
@@ -26,6 +26,7 @@
 (s/def ::buffer (s/int-in 1 1024))
 (s/def ::in-buffer ::buffer)
 (s/def ::out-buffer ::buffer)
+(s/def ::timeout (s/int-in 100 (* 10 1000)))
 (s/def ::opts (s/keys :opt-un [::max-frame-size
                                ::max-message-size
                                ::in-buffer
@@ -54,9 +55,15 @@
         (.addLast "http-handler" (http/handler))))))
 
 (defn server!
-  ([port] (server! port "/" nil))
-  ([port path {:keys [in-buffer out-buffer]
-               :or {in-buffer 1 out-buffer 1}
+  "Bootstrap a Netty server connected to core.async channels:
+    `in` - from which application takes incoming messages in the form [ChannelId text]
+    `out` - to which application puts outgoing messages in the form [ChannelId text]
+   Client connections and disconnections appear on `in` as [ChannelId bool].
+   Websocket clients are tracked in `clients` atom which contains a map of ChannelId -> arbitrary metadata map.
+   Websocket clients can be individually evicted (i.e. have their channel closed) using `evict` fn."
+  ([port] (server! port "/" {}))
+  ([port path {:keys [in-buffer out-buffer timeout]
+               :or {in-buffer 1 out-buffer 1 timeout 3000}
                :as opts}]
    {:pre [(s/valid? ::port port)
           (s/valid? ::opts opts)]}
@@ -69,17 +76,26 @@
          clients (atom {})
          in (chan in-buffer)
          out (chan out-buffer)
-         _ (go-loop []
-             (if-let [[^ChannelId id ^String msg] (<! out)] ; TODO validate
-               (let [ch (.find channel-group id)]
-                 #_(log/debug "about to write" (count msg) "characters to"
-                     (.remoteAddress ch) "on channel id" (.id ch))
-                 ; TODO addFutureListener (see ChannelFutureListener)
-                 (if ch (.writeAndFlush ch (TextWebSocketFrame. msg))
-                        (log/info "Dropped outgoing message because websocket is closed"
-                          id (get @clients id) msg))
-                 (recur))
-               (log/info "Stopped sending messages")))
+         ; Want outgoing messages to queue up in `out` chan rather than Netty,
+         ; so use ChannelFutureListener to drain `out` with backpressure:
+         post (fn post [val]
+                (if-let [[^ChannelId id ^String msg] val] ; TODO validate
+                  (if-let [ch (.find channel-group id)]
+                    #_(log/debug "about to write" (count msg) "characters to"
+                        (.remoteAddress ch) "on channel id" (.id ch))
+                    (let [cf (.writeAndFlush ch (TextWebSocketFrame. msg))]
+                      (.addListener cf (proxy [ChannelFutureListener] []
+                                         (operationComplete [f]
+                                           (when (.isCancelled f)
+                                             (log/info "Cancelled message" msg "to" id))
+                                           (when-not (.isSuccess f)
+                                             (log/error "Send error for " msg "to" id
+                                               (.cause f)))
+                                           (take! out post)))))
+                    (log/info "Dropped outgoing message because websocket is closed"
+                      id (get @clients id) msg))
+                  (log/info "Stopped sending messages")))
+         _ (take! out post)
          evict (fn [id] (some-> channel-group (.find id) .close))]
      (try (let [bootstrap (doto (ServerBootstrap.)
                             ; TODO any need for separate parent and child groups?
@@ -87,17 +103,18 @@
                             (.channel NioServerSocketChannel)
                             (.localAddress ^int (InetSocketAddress. port))
                             (.childHandler (pipeline path opts channel-group clients in)))
-                server-channel (-> bootstrap .bind .sync)]
+                server-cf (.bind bootstrap)]
             {:close (fn [] (close! out)
-                           (some-> server-channel .channel .close .sync)
-                           (-> channel-group .close .awaitUninterruptibly)
-                           (close! in)
-                           (-> loop-group .shutdownGracefully))
+                      (some-> server-cf .sync .channel .close .sync)
+                      (-> channel-group .close .sync)
+                      (close! in)
+                      (-> loop-group .shutdownGracefully)) ; could/should add .sync; makes tests slower
              :port port :path path :in in :out out :clients clients :evict evict})
           (catch Exception e
             (close! out)
             (close! in)
             (-> loop-group .shutdownGracefully .sync)
+            (log/error "Unable to bootstrap server" e)
             (throw e))))))
 
 (defn client!

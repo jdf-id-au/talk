@@ -26,7 +26,8 @@
                                   (when-not (>!! in [id false])
                                     (log/error "Unable to report disconnection because in chan is closed")))))
              (catch Exception e
-               (log/error e "Unable to register channel" ch)))
+               (log/error "Unable to register channel" ch e)
+               (throw e)))
         (.fireChannelActive ctx)))
     (channelRead0 [^ChannelHandlerContext ctx
                    ^TextWebSocketFrame frame]
