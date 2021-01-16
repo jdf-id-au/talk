@@ -24,7 +24,7 @@
   (proxy [SimpleChannelInboundHandler] [FullHttpRequest]
     ; TODO work through https://github.com/netty/netty/blob/e5951d46fc89db507ba7d2968d2ede26378f0b04/example/src/main/java/io/netty/example/http/snoop/HttpSnoopServerHandler.java
     (channelRead0 [^ChannelHandlerContext ctx ^FullHttpRequest req]
-      (log/info req)
+      #_(log/info req)
       (cond
         (-> req .decoderResult .isSuccess not)
         (respond! ctx req (DefaultFullHttpResponse. (.protocolVersion req)

@@ -34,10 +34,10 @@
                                ::out-buffer]))
 
 (defn pipeline
-  [^String path {:keys [^int max-frame-size max-message-size]
-                 :or {max-frame-size (* 64 1024)
-                      max-message-size (* 1024 1024)}
-                 :as opts}
+  [^String ws-path {:keys [^int max-frame-size max-message-size]
+                    :or {max-frame-size (* 64 1024)
+                         max-message-size (* 1024 1024)}
+                    :as opts}
    ^ChannelGroup channel-group clients in]
   (proxy [ChannelInitializer] []
     (initChannel [^SocketChannel ch]
@@ -45,12 +45,12 @@
         ; TODO could add selectively according to need
         (.addLast "http" (HttpServerCodec.))
         (.addLast "http-agg" (HttpObjectAggregator. (* 64 1024)))
-        ;(.addLast "ws-compr" (WebSocketServerCompressionHandler.))
+        (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions below
         (.addLast "ws" (WebSocketServerProtocolHandler.
-                         path nil false max-frame-size 10000 ; compiler can't find static field??:
-                         #_WebSocketServerProtocolConfig/DEFAULT_HANDSHAKE_TIMEOUT_MILLIS))
+                         ws-path nil true max-frame-size 10000)) ; compiler can't find static field??:
+                         ;WebSocketServerProtocolConfig/DEFAULT_HANDSHAKE_TIMEOUT_MILLIS))
         (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
-        (.addLast "http-handler" (http/handler path))
+        (.addLast "http-handler" (http/handler nil))
         (.addLast "ws-handler" (ws/handler channel-group clients in))))))
         ; TODO per message deflate?
         ; HttpContentEncoder HttpContentDecoder
@@ -82,7 +82,7 @@
          ; so use ChannelFutureListener to drain `out` with backpressure:
          post (fn post [val]
                 (if-let [[^ChannelId id ^String msg] val] ; TODO validate
-                  (if-let [ch (.find channel-group id)]
+                  (if-let [ch (some->> id (.find channel-group))]
                     #_(log/debug "about to write" (count msg) "characters to"
                         (.remoteAddress ch) "on channel id" (.id ch))
                     (let [cf (.writeAndFlush ch (TextWebSocketFrame. msg))]
@@ -106,7 +106,7 @@
                             (.channel NioServerSocketChannel)
                             (.localAddress ^int (InetSocketAddress. port))
                             (.childHandler (pipeline path opts channel-group clients in)))
-                server-cf (-> bootstrap .bind .sync)] ; sync casuse binding to fail here rather than later
+                server-cf (-> bootstrap .bind .sync)] ; I think sync here causes binding to fail here rather than later
             {:close (fn [] (close! out)
                       (some-> server-cf .channel .close .sync)
                       (-> channel-group .close .sync)
@@ -142,7 +142,7 @@
                :on-close
                (fn [ws status reason]
                  ; Status codes https://tools.ietf.org/html/rfc6455#section-7.4.1
-                 (log/info "Websocket closed" status (case reason "" "" (str "because " reason))))
+                 (log/info "Websocket closed" status reason))
                :on-error
                (fn [ws error]
                  (log/error "Websocket error" error))})
