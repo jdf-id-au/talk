@@ -6,11 +6,19 @@
 #_ (def s (talk/server! 8125))
 #_ ((:close s))
 
-#_ (def echo (go-loop [{:keys [ch text]} (<! (s :in))]
-               (when-not (boolean? text)
-                 (>! (s :out) {:ch ch :text (str "heard you: " text)}))
-               (recur (<! (s :in)))))
-
+#_ (def echo (go-loop [{:keys [ch text method] :as msg} (<! (s :in))]
+               (log/info "successfully <! from server in" msg)
+               (cond
+                 text
+                 (when-not (>! (s :out) {:ch ch :text (str "heard you: " text)})
+                   (log/error "failed to write to ws server out"))
+                 method
+                 (when-not (>! (s :out) {:ch ch :status 200
+                                         :headers {"Content-Encoding" "text/plain"}
+                                         :content (str msg)})
+                   (log/error "failed to write to http server out")))
+               (when msg
+                 (recur (<! (s :in))))))
 
 ; API sketch
 #_ (def s (talk/server! 8125))
@@ -44,4 +52,6 @@
  :cookies {"c1" ""}
  :content "content"}
 
+; TODO:
 ; Routing entirely within application (bidi I guess)
+; vigorous benchmarking and stress testing

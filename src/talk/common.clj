@@ -5,11 +5,11 @@
            (io.netty.channel.group ChannelGroup)
            (java.net InetSocketAddress)))
 
-(defn track-channel [^ChannelHandlerContext ctx
-                     {:keys [^ChannelGroup channel-group
-                             clients in out-pub type]
-                      :as admin}
-                     send!]
+(defn track-channel
+  [^ChannelHandlerContext ctx
+   {:keys [^ChannelGroup channel-group
+           clients in out-pub type]
+    :as admin}]
   (let [ch (.channel ctx)
         id (.id ch)
         cf (.closeFuture ch)
@@ -22,15 +22,13 @@
             :addr (-> ch ^InetSocketAddress .remoteAddress .getAddress .toString)})
          (when-not (put! in {:ch id :type type :connected true})
           (log/error "Unable to report connection because in chan is closed"))
-         (when (= type :ws)
-           (async/take! out-sub (partial send! ctx out-sub))) ; first take!, see send! for subsequent
          (.addListener cf
            (reify ChannelFutureListener
              (operationComplete [_ _]
                (swap! clients dissoc id)
-               (when-not (put! in {:ch id :type type :connected false})
+               (when-not (put! in {:ch id :connected false})
                  (log/error "Unable to report disconnection because in chan is closed")))))
          (catch Exception e
            (log/error "Unable to register channel" ch e)
            (throw e)))
-    (.fireChannelActive ctx)))
+    #_(.fireChannelActive ctx)))

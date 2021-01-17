@@ -4,8 +4,9 @@
             [talk.common :as common])
   (:import (io.netty.channel ChannelHandlerContext
                              SimpleChannelInboundHandler ChannelFutureListener ChannelHandler)
-           (io.netty.handler.codec.http.websocketx TextWebSocketFrame
-                                                   CorruptedWebSocketFrameException WebSocketFrame)
+           (io.netty.handler.codec.http.websocketx
+             TextWebSocketFrame CorruptedWebSocketFrameException WebSocketFrame
+             WebSocketServerProtocolHandler$HandshakeComplete)
            (io.netty.handler.codec TooLongFrameException)
            (java.net InetSocketAddress)
            (io.netty.channel.group ChannelGroup)))
@@ -16,6 +17,7 @@
           id (.id ch)
           ; TODO accommodate BinaryWebSocketFrame
           cf (.writeAndFlush ch (TextWebSocketFrame. text))]
+      (log/info "send!" msg)
       (.addListener cf
         (reify ChannelFutureListener
           (operationComplete [_ f]
@@ -23,6 +25,7 @@
               (log/info "Cancelled message" msg "to" id))
             (when-not (.isSuccess f)
               (log/error "Send error for" msg "to" id (.cause f)))
+            (log/info "ChannelFutureListener")
             (async/take! out-sub (partial send! ctx out-sub)))))) ; facilitate backpressure
     (log/error "Dropped outgoing message. Is sub closed?")))
 
@@ -30,13 +33,22 @@
 (defn ^ChannelHandler handler
   "Register websocket channel opening, and forward incoming text messages to `in` core.async chan.
    Server returns `clients` map atom which can be watched and enriched with additional metadata in application."
-  [{:keys [in type] :as admin}]
+  [{:keys [in type clients] :as admin}]
   (proxy [SimpleChannelInboundHandler] [WebSocketFrame]
-    (channelActive [^ChannelHandlerContext ctx] (common/track-channel ctx admin send!))
+    (userEventTriggered [^ChannelHandlerContext ctx evt]
+      (when (instance? WebSocketServerProtocolHandler$HandshakeComplete evt)
+        (let [ch (.channel ctx)
+              id (.id ch)
+              out-sub (get-in @clients [id :out-sub])]
+          (swap! clients update id assoc :type type)
+          (log/info "clients in userEventTriggered" clients)
+          (async/take! out-sub (partial send! ctx out-sub))))) ; first take!, see send! for subsequent
+        ; TODO propagate other user events??
     (channelRead0 [^ChannelHandlerContext ctx
                    ^WebSocketFrame frame]
-      ; facilitate backpressure on subsequent reads; requires (.read ch) see branches below
-      (-> ctx .channel .config (.setAutoRead false))
+      ; facilitate backpressure on subsequent reads; requires .read see branches below
+      #_(-> ctx .channel .config (.setAutoRead false))
+      #_(common/track-channel ctx admin send!)
       (let [ch (.channel ctx)
             id (.id ch)]
         (if (instance? TextWebSocketFrame frame)
@@ -50,13 +62,15 @@
             ; Netty prefers async everywhere, which is why I'm not using >!!
             (when-not (put! in {:ch id :text text}
                         (fn [val]
+                          (log/info "returned from ws put!")
                           (if val
-                            (.read ch) ; because autoRead is false
+                            nil
+                            #_(.read ctx) ; because autoRead is false
                             (log/error "Dropped incoming websocket message because in chan is closed"))))
               (log/error "Dropped incoming websocket message because in chan is closed" text)))
           ; TODO do something about closed in chan? Shutdown?
           (do (log/info "Dropped incoming websocket message because not text")
-              (.read ch)))))
+              #_(.read ctx)))))
     (exceptionCaught [^ChannelHandlerContext ctx
                       ^Throwable cause]
       (condp instance? cause

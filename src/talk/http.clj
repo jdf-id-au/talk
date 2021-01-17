@@ -20,22 +20,20 @@
   (let [status (.status res)
         ok? (= status HttpResponseStatus/OK)
         keep-alive? (and (HttpUtil/isKeepAlive req) ok?)]
-    #_(when-not ok?
-        (ByteBufUtil/writeUtf8 (.content res) (.toString status))
-        (HttpUtil/setContentLength res (-> res .content .readableBytes)))
     (HttpUtil/setKeepAlive res keep-alive?)
+    (HttpUtil/setContentLength res (-> res .content .readableBytes))
     (let [cf (.writeAndFlush ctx res)]
       (when-not keep-alive? (.addListener cf ChannelFutureListener/CLOSE)))))
 
 (defn ^ChannelHandler handler
   [{:keys [clients in type] :as admin}]
   (proxy [SimpleChannelInboundHandler] [FullHttpRequest]
-    (channelActive [^ChannelHandlerContext ctx] (common/track-channel ctx admin nil))
     ; TODO work through https://github.com/netty/netty/blob/e5951d46fc89db507ba7d2968d2ede26378f0b04/example/src/main/java/io/netty/example/http/snoop/HttpSnoopServerHandler.java
+    (channelActive [^ChannelHandlerContext ctx] (common/track-channel ctx admin))
     (channelRead0 [^ChannelHandlerContext ctx ^FullHttpRequest req]
-      ; facilitate backpressure on subsequent reads; requires (.read ch) see branches below
-      (-> ctx .channel .config (.setAutoRead false))
-      #_(log/info req)
+      ; facilitate backpressure on subsequent reads; requires .read see branches below
+      #_(-> ctx .channel .config (.setAutoRead false))
+      #_(common/track-channel ctx admin nil)
       (respond! ctx req
         (if (-> req .decoderResult .isSuccess)
           (let [ch (.channel ctx)
@@ -59,12 +57,13 @@
                    :content (some-> req .content (.toString CharsetUtil/UTF_8))}
                   (fn [val]
                     (if val
-                      (.read ch) ; because autoRead is false
+                      nil #_(.read ctx) ; because autoRead is false
                       (log/error "Dropped incoming http request because in chan is closed"))))
-              (let [; FIXME this is blocking
+              (let [; NB/FIXME this is blocking
                     {:keys [status headers cookies content]}
                     (alt!! (async/timeout 5000) {:status (.code HttpResponseStatus/SERVICE_UNAVAILABLE)}
                            out-sub ([v] v))
+                    _ (log/info "Got from alt!!")
                     buf (condp #(%1 %2) content
                           string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
                           nil? Unpooled/EMPTY_BUFFER
@@ -80,8 +79,8 @@
                 ; TODO trailing headers? for chunked responses?
                 (.set hdrs HttpHeaderNames/SET_COOKIE
                   ; TODO expiry?
-                  ^Iterable (for [[k v] cookies]
-                              (.encode ServerCookieEncoder/STRICT k v)))
+                  ^Iterable (into [] (for [[k v] cookies]
+                                       (.encode ServerCookieEncoder/STRICT k v))))
                 res)
               (do (log/error "Dropped incoming http request because in chan is closed")
                   (DefaultFullHttpResponse.

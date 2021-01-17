@@ -50,8 +50,8 @@
                          ws-path nil true max-frame-size 10000)) ; compiler can't find static field??:
         ;WebSocketServerProtocolConfig/DEFAULT_HANDSHAKE_TIMEOUT_MILLIS))
         (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
-        (.addLast "http-handler" (http/handler (assoc admin :type :http)))
-        (.addLast "ws-handler" (ws/handler (assoc admin :type :ws)))))))
+        (.addLast "ws-handler" (ws/handler (assoc admin :type :ws)))
+        (.addLast "http-handler" (http/handler (assoc admin :type :http)))))))
         ; TODO per message deflate?
         ; HttpContentEncoder HttpContentDecoder
         ; HttpContentCompressor HttpContentDecompressor
