@@ -17,7 +17,7 @@
           id (.id ch)
           ; TODO accommodate BinaryWebSocketFrame
           cf (.writeAndFlush ch (TextWebSocketFrame. text))]
-      (log/info "send!" msg)
+      #_(log/info "send!" msg)
       (.addListener cf
         (reify ChannelFutureListener
           (operationComplete [_ f]
@@ -27,7 +27,7 @@
               (log/error "Send error for" msg "to" id (.cause f)))
             (log/info "ChannelFutureListener")
             (async/take! out-sub (partial send! ctx out-sub)))))) ; facilitate backpressure
-    (log/error "Dropped outgoing message. Is sub closed?")))
+    #_(log/info "Out pub-sub closed.")))
 
 ; vs WebSocketFrame https://netty.io/4.1/xref/io/netty/example/http/websocketx/server/WebSocketFrameHandler.html
 (defn ^ChannelHandler handler
@@ -41,14 +41,13 @@
               id (.id ch)
               out-sub (get-in @clients [id :out-sub])]
           (swap! clients update id assoc :type type)
-          (log/info "clients in userEventTriggered" clients)
+          #_(log/info "clients in userEventTriggered" clients)
           (async/take! out-sub (partial send! ctx out-sub))))) ; first take!, see send! for subsequent
         ; TODO propagate other user events??
     (channelRead0 [^ChannelHandlerContext ctx
                    ^WebSocketFrame frame]
       ; facilitate backpressure on subsequent reads; requires .read see branches below
-      #_(-> ctx .channel .config (.setAutoRead false))
-      #_(common/track-channel ctx admin send!)
+      (-> ctx .channel .config (.setAutoRead false))
       (let [ch (.channel ctx)
             id (.id ch)]
         (if (instance? TextWebSocketFrame frame)
@@ -62,15 +61,14 @@
             ; Netty prefers async everywhere, which is why I'm not using >!!
             (when-not (put! in {:ch id :text text}
                         (fn [val]
-                          (log/info "returned from ws put!")
+                          #_(log/info "returned from ws put!")
                           (if val
-                            nil
-                            #_(.read ctx) ; because autoRead is false
+                            (.read ctx) ; because autoRead is false
                             (log/error "Dropped incoming websocket message because in chan is closed"))))
               (log/error "Dropped incoming websocket message because in chan is closed" text)))
           ; TODO do something about closed in chan? Shutdown?
           (do (log/info "Dropped incoming websocket message because not text")
-              #_(.read ctx)))))
+              (.read ctx)))))
     (exceptionCaught [^ChannelHandlerContext ctx
                       ^Throwable cause]
       (condp instance? cause

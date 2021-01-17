@@ -32,8 +32,7 @@
     (channelActive [^ChannelHandlerContext ctx] (common/track-channel ctx admin))
     (channelRead0 [^ChannelHandlerContext ctx ^FullHttpRequest req]
       ; facilitate backpressure on subsequent reads; requires .read see branches below
-      #_(-> ctx .channel .config (.setAutoRead false))
-      #_(common/track-channel ctx admin nil)
+      (-> ctx .channel .config (.setAutoRead false))
       (respond! ctx req
         (if (-> req .decoderResult .isSuccess)
           (let [ch (.channel ctx)
@@ -57,13 +56,13 @@
                    :content (some-> req .content (.toString CharsetUtil/UTF_8))}
                   (fn [val]
                     (if val
-                      nil #_(.read ctx) ; because autoRead is false
+                      (.read ctx) ; because autoRead is false
                       (log/error "Dropped incoming http request because in chan is closed"))))
               (let [; NB/FIXME this is blocking
                     {:keys [status headers cookies content]}
                     (alt!! (async/timeout 5000) {:status (.code HttpResponseStatus/SERVICE_UNAVAILABLE)}
                            out-sub ([v] v))
-                    _ (log/info "Got from alt!!")
+                    #_#__ (log/info "Got from alt!!")
                     buf (condp #(%1 %2) content
                           string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
                           nil? Unpooled/EMPTY_BUFFER

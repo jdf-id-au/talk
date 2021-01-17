@@ -37,7 +37,7 @@
                      ; clearer with `go-loop` and `if` than xformed chan, `pipe` etc
                      (recur (<! (server :in))))))
              (log/warn "already closed")))))
-; FIXME *** locks up whole ide! tests pass except error on long-message
+
 (deftest messages
   (let [{:keys [clients port path close evict] :as server} @server
         client @client

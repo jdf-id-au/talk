@@ -58,11 +58,11 @@
 
 (defn server!
   "Bootstrap a Netty server connected to core.async channels:
-    `in` - from which application takes incoming messages
+    `in` - from which application takes incoming messages (could pub with reference to @clients :type)
     `out` - to which application puts outgoing messages
    Client connections and disconnections appear on `in`.
-   Websocket clients are tracked in `clients` atom which contains a map of ChannelId -> arbitrary metadata map.
-   Websocket clients can be individually evicted (i.e. have their channel closed) using `evict` fn."
+   Clients are tracked in `clients` atom which contains a map of ChannelId -> arbitrary metadata map.
+   Clients can be individually evicted (i.e. have their channel closed) using `evict` fn."
   ([port] (server! port "/ws" {}))
   ([port ws-path {:keys [in-buffer out-buffer timeout]
                   :or {in-buffer 1 out-buffer 1 timeout 3000} ; FIXME timeout val not used
@@ -84,27 +84,6 @@
          in (chan in-buffer)
          out (chan out-buffer)
          out-pub (async/pub out :ch)
-         ; Want outgoing messages to queue up in `out` chan rather than Netty,
-         ; so use ChannelFutureListener to drain `out` with backpressure:
-         ;post (fn post [val]
-         ;       (if-let [[^ChannelId id ^String msg] val] ; TODO validate
-         ;         (if-let [ch (some->> id (.find channel-group))]
-         ;           #_(log/debug "about to write" (count msg) "characters to"
-         ;               (.remoteAddress ch) "on channel id" (.id ch))
-         ;           (let [cf (.writeAndFlush ch (TextWebSocketFrame. msg))]
-         ;             (.addListener cf
-         ;               (reify ChannelFutureListener
-         ;                 (operationComplete [_ f]
-         ;                   (when (.isCancelled f)
-         ;                     (log/info "Cancelled message" msg "to" id))
-         ;                   (when-not (.isSuccess f)
-         ;                     (log/error "Send error for " msg "to" id
-         ;                       (.cause f)))
-         ;                   (take! out post)))))
-         ;           (log/info "Dropped outgoing message because websocket is closed"
-         ;             id (get @clients id) msg))
-         ;         (log/info "Stopped sending messages")))
-         ;_ (take! out post)
          evict (fn [id] (some-> channel-group (.find id) .close))]
      (try (let [bootstrap (doto (ServerBootstrap.)
                             ; TODO any need for separate parent and child groups?
