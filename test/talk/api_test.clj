@@ -1,6 +1,6 @@
 (ns talk.api-test
   (:require [clojure.test :refer :all]
-            [clojure.core.async :as async :refer [chan go go-loop thread >! <! >!! <!! alt! timeout]]
+            [clojure.core.async :as async :refer [chan go go-loop thread >! <! >!! <!! alt!]]
             [hato.websocket :as hws]
             [talk.api :as talk]
             [clojure.tools.logging :as log]))
@@ -15,7 +15,7 @@
   ((:close @server)))
 
 (defn with-client [f]
-  (reset! client (talk/client! (str "ws://localhost:" port)))
+  (reset! client (talk/client! (str "ws://localhost:" port "/ws")))
   (f)
   (hws/close! (@client :ws)))
 
@@ -27,15 +27,15 @@
   [msg client server]
   (log/info "about to roundtrip" (count msg) "characters")
   (<!! (go (if (>! (client :out) msg)
-             (<! (go-loop [[id msg] (<! (server :in))]
+             (<! (go-loop [{:keys [ch text]} (<! (server :in))]
                    ; TODO probably should test connection notices too
-                   (if (boolean? msg)
+                   (if text
+                     (do (>! (server :out) {:ch ch :text text})
+                         (alt! (async/timeout 1000) ::timeout
+                               (client :in) ([v] v)))
                      ; drop connection/disconnection notices
                      ; clearer with `go-loop` and `if` than xformed chan, `pipe` etc
-                     (recur (<! (server :in)))
-                     (do (>! (server :out) [id msg])
-                         (alt! (timeout 1000) ::timeout
-                               (client :in) ([val _] val))))))
+                     (recur (<! (server :in))))))
              (log/warn "already closed")))))
 
 (deftest messages

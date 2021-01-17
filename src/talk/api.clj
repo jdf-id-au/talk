@@ -38,7 +38,7 @@
                     :or {max-frame-size (* 64 1024)
                          max-message-size (* 1024 1024)}
                     :as opts}
-   ^ChannelGroup channel-group clients in]
+   admin]
   (proxy [ChannelInitializer] []
     (initChannel [^SocketChannel ch]
       (doto (.pipeline ch)
@@ -48,25 +48,29 @@
         (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions below
         (.addLast "ws" (WebSocketServerProtocolHandler.
                          ws-path nil true max-frame-size 10000)) ; compiler can't find static field??:
-                         ;WebSocketServerProtocolConfig/DEFAULT_HANDSHAKE_TIMEOUT_MILLIS))
+        ;WebSocketServerProtocolConfig/DEFAULT_HANDSHAKE_TIMEOUT_MILLIS))
         (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
-        (.addLast "http-handler" (http/handler nil)) ; TODO pass through routing info
-        (.addLast "ws-handler" (ws/handler channel-group clients in))))))
+        (.addLast "http-handler" (http/handler (assoc admin :type :http)))
+        (.addLast "ws-handler" (ws/handler (assoc admin :type :ws)))))))
         ; TODO per message deflate?
         ; HttpContentEncoder HttpContentDecoder
         ; HttpContentCompressor HttpContentDecompressor
 
 (defn server!
   "Bootstrap a Netty server connected to core.async channels:
-    `in` - from which application takes incoming messages in the form [ChannelId text]
-    `out` - to which application puts outgoing messages in the form [ChannelId text]
-   Client connections and disconnections appear on `in` as [ChannelId bool].
+    `in` - from which application takes incoming messages
+    `out` - to which application puts outgoing messages
+   Client connections and disconnections appear on `in`.
    Websocket clients are tracked in `clients` atom which contains a map of ChannelId -> arbitrary metadata map.
    Websocket clients can be individually evicted (i.e. have their channel closed) using `evict` fn."
-  ([port] (server! port "/" {}))
-  ([port path {:keys [in-buffer out-buffer timeout]
-               :or {in-buffer 1 out-buffer 1 timeout 3000}
-               :as opts}]
+  ([port] (server! port "/ws" {}))
+  ([port ws-path {:keys [in-buffer out-buffer timeout]
+                  :or {in-buffer 1 out-buffer 1 timeout 3000} ; FIXME timeout val not used
+                  ; TODO think about all the various timeouts
+                  ; - ws handshake timeout
+                  ; - server http response timeout
+                  ; - ...
+                  :as opts}]
    {:pre [(s/valid? ::port port)
           (s/valid? ::opts opts)]}
    (let [; TODO look at aleph for epoll, thread number specification
@@ -75,45 +79,50 @@
          channel-group (DefaultChannelGroup. GlobalEventExecutor/INSTANCE)
          ; channel-group tracks channels but is not flexible enough for client metadata
          ; therefore store metadata in parallel atom:
+         ; also for administering sub(scription)s
          clients (atom {})
          in (chan in-buffer)
          out (chan out-buffer)
-         ;pub (async/pub in )
+         out-pub (async/pub out :ch)
          ; Want outgoing messages to queue up in `out` chan rather than Netty,
          ; so use ChannelFutureListener to drain `out` with backpressure:
-         post (fn post [val]
-                (if-let [[^ChannelId id ^String msg] val] ; TODO validate
-                  (if-let [ch (some->> id (.find channel-group))]
-                    #_(log/debug "about to write" (count msg) "characters to"
-                        (.remoteAddress ch) "on channel id" (.id ch))
-                    (let [cf (.writeAndFlush ch (TextWebSocketFrame. msg))]
-                      (.addListener cf
-                        (reify ChannelFutureListener
-                          (operationComplete [_ f]
-                            (when (.isCancelled f)
-                              (log/info "Cancelled message" msg "to" id))
-                            (when-not (.isSuccess f)
-                              (log/error "Send error for " msg "to" id
-                                (.cause f)))
-                            (take! out post)))))
-                    (log/info "Dropped outgoing message because websocket is closed"
-                      id (get @clients id) msg))
-                  (log/info "Stopped sending messages")))
-         _ (take! out post)
+         ;post (fn post [val]
+         ;       (if-let [[^ChannelId id ^String msg] val] ; TODO validate
+         ;         (if-let [ch (some->> id (.find channel-group))]
+         ;           #_(log/debug "about to write" (count msg) "characters to"
+         ;               (.remoteAddress ch) "on channel id" (.id ch))
+         ;           (let [cf (.writeAndFlush ch (TextWebSocketFrame. msg))]
+         ;             (.addListener cf
+         ;               (reify ChannelFutureListener
+         ;                 (operationComplete [_ f]
+         ;                   (when (.isCancelled f)
+         ;                     (log/info "Cancelled message" msg "to" id))
+         ;                   (when-not (.isSuccess f)
+         ;                     (log/error "Send error for " msg "to" id
+         ;                       (.cause f)))
+         ;                   (take! out post)))))
+         ;           (log/info "Dropped outgoing message because websocket is closed"
+         ;             id (get @clients id) msg))
+         ;         (log/info "Stopped sending messages")))
+         ;_ (take! out post)
          evict (fn [id] (some-> channel-group (.find id) .close))]
      (try (let [bootstrap (doto (ServerBootstrap.)
                             ; TODO any need for separate parent and child groups?
                             (.group loop-group)
                             (.channel NioServerSocketChannel)
                             (.localAddress ^int (InetSocketAddress. port))
-                            (.childHandler (pipeline path opts channel-group clients in)))
+                            (.childHandler (pipeline ws-path opts
+                                             {:channel-group channel-group
+                                              :clients clients
+                                              :in in
+                                              :out-pub out-pub})))
                 server-cf (-> bootstrap .bind .sync)] ; I think sync here causes binding to fail here rather than later
             {:close (fn [] (close! out)
                       (some-> server-cf .channel .close .sync)
                       (-> channel-group .close .sync)
                       (close! in)
                       (-> loop-group .shutdownGracefully)) ; could/should add .sync; makes tests slower
-             :port port :path path :in in :out out :clients clients :evict evict})
+             :port port :path ws-path :in in :out out :clients clients :evict evict})
           (catch Exception e
             (close! out)
             (close! in)
