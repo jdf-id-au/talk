@@ -6,18 +6,16 @@
             [hato.websocket :as hws]
             [clojure.spec.alpha :as s])
   (:import (io.netty.bootstrap ServerBootstrap)
-           (io.netty.channel ChannelInitializer
-                             ChannelId ChannelFutureListener)
+           (io.netty.channel ChannelInitializer)
            (io.netty.channel.nio NioEventLoopGroup)
-           (io.netty.channel.group ChannelGroup DefaultChannelGroup)
+           (io.netty.channel.group DefaultChannelGroup)
            (io.netty.channel.socket SocketChannel)
            (io.netty.channel.socket.nio NioServerSocketChannel)
            (io.netty.util.concurrent GlobalEventExecutor)
            (java.net InetSocketAddress)
-           (io.netty.handler.codec.http HttpServerCodec HttpObjectAggregator)
+           (io.netty.handler.codec.http HttpServerCodec HttpObjectAggregator HttpContentCompressor HttpContentDecompressor HttpContentEncoder HttpContentDecoder)
            (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler
-                                                   WebSocketFrameAggregator
-                                                   TextWebSocketFrame)
+                                                   WebSocketFrameAggregator)
            (io.netty.handler.codec.http.websocketx.extensions.compression
              WebSocketServerCompressionHandler)))
 
@@ -31,7 +29,8 @@
 (s/def ::opts (s/keys :opt-un [::max-frame-size
                                ::max-message-size
                                ::in-buffer
-                               ::out-buffer]))
+                               ::out-buffer
+                               ::timeout]))
 
 (defn pipeline
   [^String ws-path {:keys [^int max-frame-size max-message-size]
@@ -47,14 +46,15 @@
         (.addLast "http-agg" (HttpObjectAggregator. (* 64 1024)))
         (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions below
         (.addLast "ws" (WebSocketServerProtocolHandler.
-                         ws-path nil true max-frame-size 10000)) ; compiler can't find static field??:
+                         ws-path nil true max-frame-size 10000))
+        ; compiler can't find static field??:
         ;WebSocketServerProtocolConfig/DEFAULT_HANDSHAKE_TIMEOUT_MILLIS))
         (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
         (.addLast "ws-handler" (ws/handler (assoc admin :type :ws)))
-        (.addLast "http-handler" (http/handler (assoc admin :type :http)))))))
+        (.addLast "http-handler" (http/handler (assoc admin :type :http)))
         ; TODO per message deflate?
-        ; HttpContentEncoder HttpContentDecoder
-        ; HttpContentCompressor HttpContentDecompressor
+        #_ [HttpContentCompressor HttpContentDecompressor
+            HttpContentEncoder HttpContentDecoder]))))
 
 (defn server!
   "Bootstrap a Netty server connected to core.async channels:
@@ -95,12 +95,14 @@
                                               :clients clients
                                               :in in
                                               :out-pub out-pub})))
-                server-cf (-> bootstrap .bind .sync)] ; I think sync here causes binding to fail here rather than later
+                ; I think sync here causes binding to fail here rather than later
+                server-cf (-> bootstrap .bind .sync)]
             {:close (fn [] (close! out)
                       (some-> server-cf .channel .close .sync)
                       (-> channel-group .close .sync)
                       (close! in)
-                      (-> loop-group .shutdownGracefully)) ; could/should add .sync; makes tests slower
+                      ; could/should add .sync; makes tests slower to exit
+                      (-> loop-group .shutdownGracefully))
              :port port :path ws-path :in in :out out :clients clients :evict evict})
           (catch Exception e
             (close! out)

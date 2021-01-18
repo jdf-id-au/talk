@@ -6,6 +6,9 @@
            (java.net InetSocketAddress)))
 
 (defn track-channel
+  "Register channel in `clients` map incl `out-sub`, and report on `in`.
+   Only register from one handler, on channelActive.
+   Websocket upgrade handshake is detected, on userEventTriggered, and `clients` map is updated."
   [^ChannelHandlerContext ctx
    {:keys [^ChannelGroup channel-group
            clients in out-pub type]
@@ -20,7 +23,7 @@
            {:type type
             :out-sub out-sub
             :addr (-> ch ^InetSocketAddress .remoteAddress .getAddress .toString)})
-         (when-not (put! in {:ch id :type type :connected true})
+         (when-not (put! in {:ch id :connected true})
           (log/error "Unable to report connection because in chan is closed"))
          (.addListener cf
            (reify ChannelFutureListener

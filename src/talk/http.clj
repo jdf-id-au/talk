@@ -2,18 +2,17 @@
   (:require [talk.common :as common]
             [clojure.tools.logging :as log]
             [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close! alt!!]])
-  (:import (io.netty.buffer Unpooled ByteBufUtil ByteBuf)
+  (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
                              ChannelHandlerContext ChannelFutureListener)
-           (io.netty.handler.codec.http HttpRequest HttpContent HttpUtil
+           (io.netty.handler.codec.http HttpUtil
                                         DefaultFullHttpResponse
-                                        HttpResponseStatus HttpVersion
+                                        HttpResponseStatus
                                         FullHttpRequest FullHttpResponse
-                                        HttpMethod HttpHeaderNames QueryStringDecoder)
+                                        HttpHeaderNames QueryStringDecoder HttpMethod)
            (io.netty.util CharsetUtil)
            (io.netty.handler.codec.http.cookie ServerCookieDecoder ServerCookieEncoder)
-           (java.net InetSocketAddress)
-           (io.netty.channel.group ChannelGroup)))
+           (io.netty.handler.codec.http.multipart HttpPostRequestDecoder Attribute InterfaceHttpData FileUpload)))
 
 ; after https://netty.io/4.1/xref/io/netty/example/http/websocketx/server/WebSocketIndexPageHandler.html
 (defn respond! [^ChannelHandlerContext ctx ^FullHttpRequest req ^FullHttpResponse res]
@@ -21,39 +20,59 @@
         ok? (= status HttpResponseStatus/OK)
         keep-alive? (and (HttpUtil/isKeepAlive req) ok?)]
     (HttpUtil/setKeepAlive res keep-alive?)
+    ; May need to review when enabling HttpContentEncoder etc:
     (HttpUtil/setContentLength res (-> res .content .readableBytes))
     (let [cf (.writeAndFlush ctx res)]
       (when-not keep-alive? (.addListener cf ChannelFutureListener/CLOSE)))))
 
 (defn ^ChannelHandler handler
-  [{:keys [clients in type] :as admin}]
+  [{:keys [clients in] :as admin}]
   (proxy [SimpleChannelInboundHandler] [FullHttpRequest]
-    ; TODO work through https://github.com/netty/netty/blob/e5951d46fc89db507ba7d2968d2ede26378f0b04/example/src/main/java/io/netty/example/http/snoop/HttpSnoopServerHandler.java
     (channelActive [^ChannelHandlerContext ctx] (common/track-channel ctx admin))
     (channelRead0 [^ChannelHandlerContext ctx ^FullHttpRequest req]
       ; facilitate backpressure on subsequent reads; requires .read see branches below
       (-> ctx .channel .config (.setAutoRead false))
+      ; TODO NB `respond!` in channelRead0 is inherently synchronous... check whether this is the right way... can't find counterexample...
       (respond! ctx req
         (if (-> req .decoderResult .isSuccess)
           (let [ch (.channel ctx)
                 id (.id ch)
                 out-sub (get-in @clients [id :out-sub])
+                method (.method req)
                 qsd (-> req .uri QueryStringDecoder.)]
+            ; TODO reorganise if gets too long
             (if (put! in
-                  {:ch id
-                   :method (-> req .method .toString keyword)
-                   :path (.path qsd)
-                   :query (.parameters qsd)
-                   :protocol (-> req .protocolVersion .toString)
-                   :headers (->> req .headers .iteratorAsString iterator-seq
-                              ; TODO drop cookies headers; are repeated headers coalesced?
-                              ; https://stackoverflow.com/questions/4371328/are-duplicate-http-response-headers-acceptable#:~:text=Yes&text=So%2C%20multiple%20headers%20with%20the,comma%2Dseparated%20list%20of%20values.
-                              (into {} (map (fn [[k v]] [(keyword k) v]))))
-                   :cookies (some->>
-                              (some-> req .headers (.get HttpHeaderNames/COOKIE))
-                              (.decode ServerCookieDecoder/STRICT)
-                              (into {} (map (fn [c] [(.name c) (.value c)]))))
-                   :content (some-> req .content (.toString CharsetUtil/UTF_8))}
+                  (cond->
+                    {:ch id
+                     :method (-> method .toString keyword)
+                     :path (.path qsd)
+                     :query (.parameters qsd)
+                     :protocol (-> req .protocolVersion .toString)
+                     :headers (->> req .headers .iteratorAsString iterator-seq
+                                ; TODO drop cookies headers; are repeated headers coalesced?
+                                ; https://stackoverflow.com/questions/4371328/are-duplicate-http-response-headers-acceptable#:~:text=Yes&text=So%2C%20multiple%20headers%20with%20the,comma%2Dseparated%20list%20of%20values.
+                                (into {} (map (fn [[k v]] [(keyword k) v]))))
+                     :cookies (some->>
+                                (some-> req .headers (.get HttpHeaderNames/COOKIE))
+                                (.decode ServerCookieDecoder/STRICT)
+                                (into {} (map (fn [c] [(.name c) (.value c)]))))
+                     ; TODO check content type and encoding...
+                     :content (some-> req .content (.toString CharsetUtil/UTF_8))}
+                    ; TODO https://gist.github.com/breznik/6215834
+                    (= method HttpMethod/POST)
+                    (assoc :data
+                           (into [] (for [^InterfaceHttpData bhd
+                                          (-> req HttpPostRequestDecoder. .getBodyHttpDatas)]
+                                      (condp instance? bhd
+                                        Attribute [(.getName bhd) (.getValue ^Attribute bhd)]
+                                        FileUpload [(.getName bhd)
+                                                    (apply str "Unsupported file upload "
+                                                      ((juxt .getFilename
+                                                         .getContentType
+                                                         .getContentTransferEncoding)
+                                                       ^FileUpload bhd))]
+                                        [(.getName bhd) (str "Unsupported http body data type "
+                                                          (.getHttpDataType bhd))])))))
                   (fn [val]
                     (if val
                       (.read ctx) ; because autoRead is false

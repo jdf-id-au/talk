@@ -1,15 +1,12 @@
 (ns talk.ws
   (:require [clojure.tools.logging :as log]
-            [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close!]]
-            [talk.common :as common])
+            [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close!]])
   (:import (io.netty.channel ChannelHandlerContext
                              SimpleChannelInboundHandler ChannelFutureListener ChannelHandler)
            (io.netty.handler.codec.http.websocketx
              TextWebSocketFrame CorruptedWebSocketFrameException WebSocketFrame
              WebSocketServerProtocolHandler$HandshakeComplete)
-           (io.netty.handler.codec TooLongFrameException)
-           (java.net InetSocketAddress)
-           (io.netty.channel.group ChannelGroup)))
+           (io.netty.handler.codec TooLongFrameException)))
 
 (defn send! [^ChannelHandlerContext ctx out-sub {:keys [^String text] :as msg}]
   (if msg
@@ -29,10 +26,9 @@
             (async/take! out-sub (partial send! ctx out-sub)))))) ; facilitate backpressure
     #_(log/info "Out pub-sub closed.")))
 
-; vs WebSocketFrame https://netty.io/4.1/xref/io/netty/example/http/websocketx/server/WebSocketFrameHandler.html
 (defn ^ChannelHandler handler
-  "Register websocket channel opening, and forward incoming text messages to `in` core.async chan.
-   Server returns `clients` map atom which can be watched and enriched with additional metadata in application."
+  "Forward incoming text messages to `in`.
+   Send outgoing text messages from `out-sub`."
   [{:keys [in type clients] :as admin}]
   (proxy [SimpleChannelInboundHandler] [WebSocketFrame]
     (userEventTriggered [^ChannelHandlerContext ctx evt]
@@ -51,7 +47,7 @@
       (let [ch (.channel ctx)
             id (.id ch)]
         (if (instance? TextWebSocketFrame frame)
-          (let [text (.text frame)]
+          (let [text (.text ^TextWebSocketFrame frame)]
             #_(log/debug "received" (count (.text frame)) "characters from"
                 (.remoteAddress ch) "on channel id" (.id ch))
             ; http://cdn.cognitect.com/presentations/2014/insidechannels.pdf
