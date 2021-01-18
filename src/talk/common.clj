@@ -6,9 +6,12 @@
            (java.net InetSocketAddress)))
 
 (defn track-channel
-  "Register channel in `clients` map incl `out-sub`, and report on `in`.
-   Only register from one handler, on channelActive.
-   Websocket upgrade handshake is detected, on userEventTriggered, and `clients` map is updated."
+  "Register channel in `clients` map and report on `in` chan.
+   Map entry is a map containing `type`, `out-sub` and `addr`, and can be updated.
+
+   Usage:
+   - Only register from one handler, using channelActive.
+   - Detect websocket upgrade handshake, using userEventTriggered, and update `clients` map."
   [^ChannelHandlerContext ctx
    {:keys [^ChannelGroup channel-group
            clients in out-pub type]

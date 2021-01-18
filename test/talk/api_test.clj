@@ -21,7 +21,6 @@
 
 (use-fixtures :once with-server with-client)
 
-
 (defn round-trip
   "Send message from client to server and back again."
   [msg client server]

@@ -28,7 +28,8 @@
 
 (defn ^ChannelHandler handler
   "Forward incoming text messages to `in`.
-   Send outgoing text messages from `out-sub`."
+   Send outgoing text messages from `out-sub`.
+   Both asynchronously and with backpressure."
   [{:keys [in type clients] :as admin}]
   (proxy [SimpleChannelInboundHandler] [WebSocketFrame]
     (userEventTriggered [^ChannelHandlerContext ctx evt]

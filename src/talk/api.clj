@@ -13,7 +13,9 @@
            (io.netty.channel.socket.nio NioServerSocketChannel)
            (io.netty.util.concurrent GlobalEventExecutor)
            (java.net InetSocketAddress)
-           (io.netty.handler.codec.http HttpServerCodec HttpObjectAggregator HttpContentCompressor HttpContentDecompressor HttpContentEncoder HttpContentDecoder)
+           (io.netty.handler.codec.http HttpServerCodec HttpObjectAggregator
+                                        HttpContentCompressor HttpContentDecompressor
+                                        HttpContentEncoder HttpContentDecoder)
            (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler
                                                    WebSocketFrameAggregator)
            (io.netty.handler.codec.http.websocketx.extensions.compression
@@ -29,11 +31,11 @@
 (s/def ::opts (s/keys :opt-un [::max-frame-size
                                ::max-message-size
                                ::in-buffer
-                               ::out-buffer
-                               ::timeout]))
+                               ::out-buffer]))
 
 (defn pipeline
-  [^String ws-path {:keys [^int max-frame-size max-message-size]
+  [^String ws-path {:keys [^int max-frame-size
+                           ^int max-message-size]
                     :or {max-frame-size (* 64 1024)
                          max-message-size (* 1024 1024)}
                     :as opts}
@@ -62,10 +64,11 @@
     `out` - to which application puts outgoing messages
    Client connections and disconnections appear on `in`.
    Clients are tracked in `clients` atom which contains a map of ChannelId -> arbitrary metadata map.
-   Clients can be individually evicted (i.e. have their channel closed) using `evict` fn."
+   Clients can be individually evicted (i.e. have their channel closed) using `evict` fn.
+   Websocket path defaults to /ws"
   ([port] (server! port "/ws" {}))
-  ([port ws-path {:keys [in-buffer out-buffer timeout]
-                  :or {in-buffer 1 out-buffer 1 timeout 3000} ; FIXME timeout val not used
+  ([port ws-path {:keys [in-buffer out-buffer]
+                  :or {in-buffer 1 out-buffer 1}
                   ; TODO think about all the various timeouts
                   ; - ws handshake timeout
                   ; - server http response timeout
