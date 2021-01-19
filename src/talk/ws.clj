@@ -44,7 +44,7 @@
     (channelRead0 [^ChannelHandlerContext ctx
                    ^WebSocketFrame frame]
       ; facilitate backpressure on subsequent reads; requires .read see branches below
-      (-> ctx .channel .config (.setAutoRead false))
+      ;(-> ctx .channel .config (.setAutoRead false)) ; Should already be off from http handler channelActive?
       (let [ch (.channel ctx)
             id (.id ch)]
         (if (instance? TextWebSocketFrame frame)

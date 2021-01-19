@@ -45,9 +45,7 @@
          max-frame-size (* 64 1024)
          max-message-size (* 1024 1024)}
     :as opts}
-   {:keys [^int handler-timeout] ; both HTTP and ws for the moment
-    :or {handler-timeout (* 5 1000)}
-    :as admin}] ; admin is handler-opts merged with other kvs (see caller)
+   admin] ; admin is handler-opts merged with other kvs (see caller)
   (proxy [ChannelInitializer] []
     (initChannel [^SocketChannel ch]
       (doto (.pipeline ch)
