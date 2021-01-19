@@ -33,21 +33,19 @@
 
 ; TODO:
 ; Routing entirely within application (bidi I guess)
-; HTTP basics - some in application?
+; HTTP basics - some in application; could plagiarise bits of Ring
 ; spec all messages
 ; vigorous benchmarking and stress testing
 
-(def routes ["/" {"index.html" :index
-                  "articles/" {"index.html" :article-index
-                               [:id "/article.html"] :article}}])
-
+#_ (def routes ["/" {"index.html" :index
+                     "articles/" {"index.html" :article-index
+                                  [:id "/article.html"] :article}}])
 #_ (bidi/path-for routes :article :id 123)
 ;=> "/articles/123/article.html"
 #_ (bidi/match-route routes "/articles/123/article.html")
 ;=> {:handler :article, :route-params {:id "123"}}
-
-; Don't really want to support ring or bidi.ring...
+; Don't really want to support Ring or bidi.ring...
 ; https://github.com/juxt/bidi/blob/master/test/bidi/ring_test.clj
-; Just steal ideas... (guards?)
+; Just steal ideas...
 
 ; Do set up static file serving for convenience? Maybe just individual files?

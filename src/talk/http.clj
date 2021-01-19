@@ -31,7 +31,7 @@
 (defn ^ChannelHandler handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond *synchronously* from `out-sub`."
   ; TODO read about HTTP/2 https://developers.google.com/web/fundamentals/performance/http2
-  [{:keys [clients in] :as admin}]
+  [{:keys [clients in handler-timeout] :as admin}]
   (proxy [SimpleChannelInboundHandler] [FullHttpRequest]
     (channelActive [^ChannelHandlerContext ctx] (common/track-channel ctx admin))
     (channelRead0 [^ChannelHandlerContext ctx ^FullHttpRequest req]
@@ -86,7 +86,8 @@
                       (log/error "Dropped incoming http request because in chan is closed"))))
               (let [; NB/FIXME this is blocking
                     {:keys [status headers cookies content]}
-                    (alt!! (async/timeout 5000) {:status (.code HttpResponseStatus/SERVICE_UNAVAILABLE)}
+                    (alt!! (async/timeout handler-timeout)
+                           {:status (.code HttpResponseStatus/SERVICE_UNAVAILABLE)}
                            out-sub ([v] v))
                     #_#__ (log/info "Got from alt!!")
                     buf (condp #(%1 %2) content

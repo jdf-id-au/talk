@@ -21,42 +21,48 @@
            (io.netty.handler.codec.http.websocketx.extensions.compression
              WebSocketServerCompressionHandler)))
 
-(s/def ::port (s/int-in 1024 65535))
-(s/def ::max-frame-size (s/int-in 1024 (* 1024 1024)))
-(s/def ::max-message-size (s/int-in 1024 (* 10 1024 1024)))
-(s/def ::buffer (s/int-in 1 1024))
-(s/def ::in-buffer ::buffer)
-(s/def ::out-buffer ::buffer)
-(s/def ::timeout (s/int-in 100 (* 10 1000)))
-(s/def ::opts (s/keys :opt-un [::max-frame-size
-                               ::max-message-size
-                               ::in-buffer
-                               ::out-buffer]))
+;(s/def ::port (s/int-in 1024 65535))
+;; TODO update vs actual opts use below
+;(s/def ::max-frame-size (s/int-in 1024 (* 1024 1024)))
+;(s/def ::max-message-size (s/int-in 1024 (* 10 1024 1024)))
+;(s/def ::buffer (s/int-in 1 1024))
+;(s/def ::in-buffer ::buffer)
+;(s/def ::out-buffer ::buffer)
+;(s/def ::timeout (s/int-in 100 (* 10 1000)))
+;(s/def ::opts (s/keys :opt-un [::max-frame-size
+;                               ::max-message-size
+;                               ::in-buffer
+;                               ::out-buffer]))
 
 (defn pipeline
-  [^String ws-path {:keys [^int max-frame-size
-                           ^int max-message-size]
-                    :or {max-frame-size (* 64 1024)
-                         max-message-size (* 1024 1024)}
-                    :as opts}
-   admin]
+  [^String ws-path
+   {:keys [^int max-content-length
+           ^int handshake-timeout
+           ^int max-frame-size
+           ^int max-message-size]
+    :or {max-content-length (* 64 1024)
+         handshake-timeout (* 5 1000)
+         max-frame-size (* 64 1024)
+         max-message-size (* 1024 1024)}
+    :as opts}
+   {:keys [^int handler-timeout] ; both HTTP and ws for the moment
+    :or {handler-timeout (* 5 1000)}
+    :as admin}] ; admin is handler-opts merged with other kvs (see caller)
   (proxy [ChannelInitializer] []
     (initChannel [^SocketChannel ch]
       (doto (.pipeline ch)
         ; TODO could add selectively according to need
         (.addLast "http" (HttpServerCodec.))
-        (.addLast "http-agg" (HttpObjectAggregator. (* 64 1024)))
+        (.addLast "http-agg" (HttpObjectAggregator. max-content-length))
         (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions below
         (.addLast "ws" (WebSocketServerProtocolHandler.
-                         ws-path nil true max-frame-size 10000))
-        ; compiler can't find static field??:
-        ;WebSocketServerProtocolConfig/DEFAULT_HANDSHAKE_TIMEOUT_MILLIS))
+                         ; TODO [application] could specify subprotocol?
+                         ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
+                         ws-path nil true max-frame-size handshake-timeout))
         (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
         (.addLast "ws-handler" (ws/handler (assoc admin :type :ws)))
         (.addLast "http-handler" (http/handler (assoc admin :type :http)))
-        ; TODO per message deflate?
-        #_ [HttpContentCompressor HttpContentDecompressor
-            HttpContentEncoder HttpContentDecoder]))))
+        #_ [HttpContentCompressor HttpContentDecompressor])))) ; less network but more memory
 
 (defn server!
   "Bootstrap a Netty server connected to core.async channels:
@@ -67,15 +73,11 @@
    Clients can be individually evicted (i.e. have their channel closed) using `evict` fn.
    Websocket path defaults to /ws"
   ([port] (server! port "/ws" {}))
-  ([port ws-path {:keys [in-buffer out-buffer]
+  ([port ws-path {:keys [in-buffer out-buffer handler-opts]
                   :or {in-buffer 1 out-buffer 1}
-                  ; TODO think about all the various timeouts
-                  ; - ws handshake timeout
-                  ; - server http response timeout
-                  ; - ...
                   :as opts}]
-   {:pre [(s/valid? ::port port)
-          (s/valid? ::opts opts)]}
+   #_{:pre [(s/valid? ::port port)
+            (s/valid? ::opts opts)]}
    (let [; TODO look at aleph for epoll, thread number specification
          loop-group (NioEventLoopGroup.)
          ; single threaded executor is for group actions
@@ -93,11 +95,13 @@
                             (.group loop-group)
                             (.channel NioServerSocketChannel)
                             (.localAddress ^int (InetSocketAddress. port))
-                            (.childHandler (pipeline ws-path opts
-                                             {:channel-group channel-group
-                                              :clients clients
-                                              :in in
-                                              :out-pub out-pub})))
+                            (.childHandler (pipeline ws-path
+                                             (dissoc opts :handler-opts)
+                                             (merge handler-opts
+                                               {:channel-group channel-group
+                                                :clients clients
+                                                :in in
+                                                :out-pub out-pub}))))
                 ; I think sync here causes binding to fail here rather than later
                 server-cf (-> bootstrap .bind .sync)]
             {:close (fn [] (close! out)
