@@ -31,7 +31,7 @@
       ; No need for backpressure here? (c.f. ws/send!)
 
 (defn ^ChannelHandler handler
-  "Parse HTTP requests and forward to `in` with backpressure. Respond *synchronously* from `out-sub`."
+  "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
   ; TODO read about HTTP/2 https://developers.google.com/web/fundamentals/performance/http2
   [{:keys [clients in handler-timeout]
     :or {handler-timeout (* 5 1000)}
@@ -91,7 +91,6 @@
           (go
             (if (>! in request-map)
               (try
-                (log/info "got here at least" admin)
                 (if-let [{:keys [status headers cookies content]}
                          (alt! out-sub ([v] v) (async/timeout handler-timeout) nil)]
                   (let [buf (condp #(%1 %2) content
@@ -108,7 +107,7 @@
                     ; TODO need to support repeated headers (other than Set-Cookie ?)
                     ; TODO trailing headers? for chunked responses? Interaction with HttpObjectAggregator?
                     (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
-                      (into [] (for [[k v] cookies] (.encode ServerCookieEncoder/STRICT k v))))
+                      (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
                     (respond! ctx keep-alive? res)
                     (.read ctx)) ; because autoRead is false
                   (do (log/error "Dropped incoming http request because of out chan timeout")
