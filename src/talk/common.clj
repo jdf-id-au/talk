@@ -13,8 +13,7 @@
    - Only register from one handler, using channelActive.
    - Detect websocket upgrade handshake, using userEventTriggered, and update `clients` map."
   [^ChannelHandlerContext ctx
-   {:keys [^ChannelGroup channel-group
-           clients in out-pub type]
+   {:keys [^ChannelGroup channel-group clients in out-pub type]
     :as admin}]
   (let [ch (.channel ctx)
         id (.id ch)

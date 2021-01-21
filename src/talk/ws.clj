@@ -63,7 +63,7 @@
                             (.read ctx) ; because autoRead is false
                             (log/error "Dropped incoming websocket message because in chan is closed"))))
               (log/error "Dropped incoming websocket message because in chan is closed" text)))
-          ; TODO do something about closed in chan? Shutdown?
+              ; TODO do something about closed in chan? Shutdown?
           (do (log/info "Dropped incoming websocket message because not text")
               (.read ctx)))))
     (exceptionCaught [^ChannelHandlerContext ctx
