@@ -19,7 +19,8 @@
            (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler
                                                    WebSocketFrameAggregator)
            (io.netty.handler.codec.http.websocketx.extensions.compression
-             WebSocketServerCompressionHandler)))
+             WebSocketServerCompressionHandler)
+           (io.netty.handler.stream ChunkedWriteHandler)))
 
 ;(s/def ::port (s/int-in 1024 65535))
 ;; TODO update vs actual opts use below
@@ -40,7 +41,7 @@
            ^int handshake-timeout
            ^int max-frame-size
            ^int max-message-size]
-    :or {max-content-length (* 64 1024)
+    :or {max-content-length (* 1024 1024)
          handshake-timeout (* 5 1000)
          max-frame-size (* 64 1024)
          max-message-size (* 1024 1024)}
@@ -51,7 +52,9 @@
       (doto (.pipeline ch)
         ; TODO could add selectively according to need
         (.addLast "http" (HttpServerCodec.))
+        ; inbound only https://stackoverflow.com/a/38947978/780743
         (.addLast "http-agg" (HttpObjectAggregator. max-content-length))
+        (.addLast "streamer" (ChunkedWriteHandler.))
         (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions below
         (.addLast "ws" (WebSocketServerProtocolHandler.
                          ; TODO [application] could specify subprotocol?
