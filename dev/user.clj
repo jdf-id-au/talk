@@ -4,23 +4,26 @@
             [clojure.core.async :as async :refer [chan go go-loop thread >! <! >!! <!! alt! timeout]]
             [clojure.tools.logging :as log]))
 
-#_ (def s (talk/server! 8125))
 #_ ((:close s))
-
+#_ (def s (talk/server! 8125))
 #_ (def echo
-     (go-loop [{:keys [ch connected text method] :as msg} (<! (s :in))]
+     (go-loop [{:keys [ch connected text method data] :as msg} (<! (s :in))]
        (log/info "successfully <! from server in" msg)
        (cond
          text
          (when-not (>! (s :out) {:ch ch :text (str "heard you: " text)})
            (log/error "failed to write to ws server out"))
-         (some-> msg :data :value)
-         (when-not (>! (s :out) {:ch ch :status 200}))
+
+         (some->> data (map :file) seq)
+         (when-not (>! (s :out) {:ch ch :status 200 :content (->> data (map :file) first)})
+           (log/error "failed to write file response to http server out"))
+
          method
          (when-not (>! (s :out) {:ch ch :status 200
                                  :headers {"Content-Encoding" "text/plain"}
-                                 :content (str msg)})
+                                 :content (str "message containing " data ": " msg)})
            (log/error "failed to write to http server out"))
+
          connected
          (log/info "connection" ch connected))
        (when msg
@@ -34,6 +37,9 @@
 ; or {:ch <ChannelId> :text "..."} for ws
 ; Server internally publishes `out` using :ch topic.
 
+; Can test file upload POST and PUT with (respectively):
+; % curl -o POST.pdf --form "fileupload=@file.pdf;filename=hmm.pdf" http://localhost:8125
+; $ curl -o PUT.pdf -v -T file.pdf http://localhost:8125
 ; TODO:
 ; Routing entirely within application (bidi I guess)
 ; HTTP basics - some in application; could plagiarise bits of Ring

@@ -21,7 +21,7 @@
                                                   FileUpload Attribute
                                                   DiskFileUpload DiskAttribute
                                                   MixedFileUpload MixedAttribute)
-           (java.io File)
+           (java.io File RandomAccessFile)
            (java.net URLConnection)))
 
 ; after https://netty.io/4.1/xref/io/netty/example/http/websocketx/server/WebSocketIndexPageHandler.html
@@ -42,62 +42,77 @@
   [^ChannelHandlerContext ctx keep-alive? ^HttpResponse res ^File file]
    ; after https://github.com/datskos/ring-netty-adapter/blob/master/src/ring/adapter/plumbing.clj and current docs
   (assert (.isFile file))
-  (let [len (.length file)
-        region (DefaultFileRegion. file 0 len)
+  (let [raf (RandomAccessFile. file "r")
+        len (.length raf)
+        ; connection seems to close prematurely when using DFR directly on file - because lazy open?
+        region (DefaultFileRegion. (.getChannel raf) 0 len) #_(DefaultFileRegion. file 0 len)
         ; NB breaks if no os support for zero-copy
         hdrs (.headers res)]
-    (when-not (.get hdrs "Content-Type")
-      (.set hdrs "Content-Type" (URLConnection/guessContentTypeFromName (.getName file))))
+    (when-not (.get hdrs HttpHeaderNames/CONTENT_TYPE)
+      (some->> file .getName URLConnection/guessContentTypeFromName
+        (.set hdrs HttpHeaderNames/CONTENT_TYPE)))
     (HttpUtil/setContentLength res len)
     ; TODO backpressure?
-    ; FIXME write on channel or context?
     (.writeAndFlush ctx res) ; initial line and header
     (let [cf (.writeAndFlush ctx region)] ; encoded into several HttpContents?
-      (.addListener cf
-        (reify ChannelFutureListener ; FIXME progress? ChannelProgressiveFutureListener ?
-          (operationComplete [_ _]
-            (.release region))))
       (when-not keep-alive? (.addListener cf ChannelFutureListener/CLOSE)))))
 
-(def post-handler
-  "Handle HTTP POST data. Does not apply charset automatically.
+(def upload-handler
+  "Handle HTTP POST/PUT/PATCH data. Does not apply charset automatically.
    NB data >16kB will be stored in tempfiles, which will be lost on JVM shutdown.
-   Must destroy decoder after response sent; this will also remove tempfiles."
+   Must cleanup after response sent; this will also remove tempfiles."
   ; after https://gist.github.com/breznik/6215834
-  ; TODO protect file uploads somehow
+  ; TODO protect against file upload abuse somehow
   (let [data-factory (DefaultHttpDataFactory.)] ; memory if <16kB, else disk
     (set! (. DiskFileUpload deleteOnExitTemporaryFile) true) ; same as default
     (set! (. DiskFileUpload baseDirectory) nil) ; system temp directory
     (set! (. DiskAttribute deleteOnExitTemporaryFile) true)
     (set! (. DiskAttribute baseDirectory) nil)
-    (fn [req]
-      (when (= (.method req) HttpMethod/POST)
+    (fn [^FullHttpRequest req]
+      (condp contains? (.method req)
+        #{HttpMethod/POST}
         (let [decoder (HttpPostRequestDecoder. data-factory req)]
-          {:post-decoder decoder
-           :post-data
-           (into {}
-             (for [^InterfaceHttpData d (.getBodyHttpDatas decoder)]
-               [(.getName d)
-                (condp instance? d
-                  ; Only if application/x-www-form-urlencoded ?
-                  Attribute
-                  (let [a ^MixedAttribute d
-                        base {:charset (.getCharset a)}]
-                    (if (.isInMemory a)
-                      ; NB puts onus on application to apply charset
-                      ; e.g. (slurp value :encoding "UTF-8")
-                      (assoc base :value (.get a))
-                      (assoc base :file (.getFile a))))
-                  FileUpload
-                  (let [f ^MixedFileUpload d
-                        base {:charset (.getCharset f)
-                              :client-filename (.getFilename f)
-                              :content-type (.getContentType f)
-                              :content-transfer-encoding (.getContentTransferEncoding f)}]
-                    (if (.isInMemory f)
-                      (assoc base :value (.get f))
-                      (assoc base :file (.getFile f))))
-                  (log/info "Unsupported http body data type " (.getHttpDataType d)))]))})))))
+          {:cleanup #(.destroy decoder)
+           :data
+           (into []
+             (for [^InterfaceHttpData d (.getBodyHttpDatas decoder)
+                   :let [base {:name (.getName d)}]]
+               (condp instance? d
+                 ; Only if application/x-www-form-urlencoded ?
+                 Attribute
+                 (let [a ^MixedAttribute d
+                       base (assoc base :charset (.getCharset a))]
+                   (if (.isInMemory a)
+                     ; NB puts onus on application to apply charset
+                     ; e.g. (slurp value :encoding "UTF-8")
+                     (assoc base :value (.get a))
+                     (assoc base :file (.getFile a))))
+                 FileUpload
+                 (let [f ^MixedFileUpload d
+                       base (assoc base :charset (.getCharset f)
+                                        :client-filename (.getFilename f)
+                                        :content-type (.getContentType f)
+                                        :content-transfer-encoding (.getContentTransferEncoding f))]
+                   (if (.isInMemory f)
+                     (assoc base :value (.get f))
+                     (assoc base :file (.getFile f))))
+                 (log/info "Unsupported http body data type "
+                   (assoc base :type (.getHttpDataType d))))))})
+        #{HttpMethod/PUT HttpMethod/PATCH}
+        (let [mime-type (or (HttpUtil/getMimeType req) "application/octet-stream")
+              charset (HttpUtil/getCharset req)
+              content-length (HttpUtil/getContentLength req)
+              base {:charset charset}
+              u (doto (.createFileUpload data-factory
+                        req "PUT data" "see path" mime-type "binary" charset content-length)
+                      ; https://stackoverflow.com/a/41572878/780743
+                      (.setContent (.content (.retain req))))]
+          {:cleanup #(.cleanRequestHttpData data-factory req)
+           :data (vector (if (.isInMemory u)
+                           (assoc base :value (.get u))
+                           (assoc base :file (.getFile u))))})
+        ; else
+        nil))))
 
 (defn ^ChannelHandler handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
@@ -128,27 +143,34 @@
                       :path (.path qsd)
                       :query (.parameters qsd)
                       :protocol (-> req .protocolVersion .toString)}
-              headers+cookies (some->> req .headers .iteratorAsString iterator-seq
-                                (reduce
-                                  ; Are repeated headers already coalesced by netty?
-                                  ; Does it handle keys case-sensitively?
-                                  (fn [m [k v]]
-                                    (let [lck (-> k str/lower-case keyword)]
-                                      (case lck
-                                        :cookie
-                                        (update m :cookies into
-                                          (for [^Cookie c (.decode ServerCookieDecoder/STRICT v)]
-                                            ; TODO could look at max-age, etc...
-                                            [(.name c) (.value c)]))
-                                        (update-in m [:headers lck] conj v))))
-                                  {}))
-              {:keys [post-data ^HttpPostRequestDecoder post-decoder]} (post-handler req)
+              {:keys [headers cookies]}
+              (some->> req .headers .iteratorAsString iterator-seq
+                (reduce
+                  ; Are repeated headers already coalesced by netty?
+                  ; Does it handle keys case-sensitively?
+                  (fn [m [k v]]
+                    (let [lck (-> k str/lower-case keyword)]
+                      (case lck
+                        :cookie
+                        (update m :cookies into
+                          (for [^Cookie c (.decode ServerCookieDecoder/STRICT v)]
+                            ; TODO could look at max-age, etc...
+                            [(.name c) (.value c)]))
+                        (update m :headers
+                          (fn [hs]
+                            (if-let [old (get hs lck)]
+                              (if (vector? old)
+                                (conj old v)
+                                [old v])
+                              (assoc hs lck v)))))))
+                  {}))
+              {:keys [data cleanup] :or {cleanup (constantly nil)}} (upload-handler req)
+              _ (log/debug "data" data)
               request-map
-              (cond-> (merge basics headers+cookies)
-                post-data (assoc :data post-data)
-                ; TODO check content type and charset if specified... or just stream bytes?
-                ; Not really fair to expect application to do.
-                (not post-decoder) (assoc :content (some-> req .content (.toString CharsetUtil/UTF_8))))]
+              (cond-> (assoc basics :headers headers :cookies cookies)
+                data (assoc :data data)
+                (not data) (assoc :content (some-> req .content
+                                             (.toString (HttpUtil/getCharset req)))))]
           (go
             (if (>! in request-map)
               (try
@@ -176,28 +198,28 @@
                                   (HttpResponseStatus/valueOf status)
                                   ^ByteBuf buf)
                             hdrs (.headers res)]
-                        (doseq [[k v] headers] (.set hdrs (name k) v))
+                        (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
                         ; TODO need to support repeated headers (other than Set-Cookie ?)
                         (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
                           (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
                         (respond! ctx keep-alive? res)))
-                    (some-> post-decoder .destroy)
+                    (cleanup)
                     (.read ctx)) ; because autoRead is false
                   (do (log/error "Dropped incoming http request because of out chan timeout")
-                      (some-> post-decoder .destroy)
+                      (cleanup)
                       (respond! ctx false (DefaultFullHttpResponse.
                                             protocol-version
                                             HttpResponseStatus/SERVICE_UNAVAILABLE
                                             Unpooled/EMPTY_BUFFER))))
                 (catch Exception e
                   (log/error "Error in http response handler" e)
-                  (some-> post-decoder .destroy)
+                  (cleanup)
                   (respond! ctx false (DefaultFullHttpResponse.
                                         protocol-version
                                         HttpResponseStatus/INTERNAL_SERVER_ERROR
                                         Unpooled/EMPTY_BUFFER))))
               (do (log/error "Dropped incoming http request because in chan is closed")
-                  (some-> post-decoder .destroy)
+                  (cleanup)
                   (respond! ctx false (DefaultFullHttpResponse.
                                         protocol-version
                                         HttpResponseStatus/SERVICE_UNAVAILABLE
