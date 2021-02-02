@@ -1,9 +1,8 @@
 (ns talk.aggregators
   (:import (io.netty.handler.codec MessageAggregator DecoderResult)
-           (io.netty.handler.codec.http HttpObject HttpMessage HttpContent LastHttpContent FullHttpMessage HttpUtil HttpRequest HttpVersion HttpHeaderNames HttpHeaderValues HttpExpectationFailedEvent DefaultFullHttpResponse HttpResponseStatus FullHttpResponse HttpResponse HttpStatusClass HttpHeaders EmptyHttpHeaders)
+           (io.netty.handler.codec.http HttpObject HttpMessage HttpContent LastHttpContent FullHttpMessage HttpUtil HttpRequest HttpVersion HttpHeaderNames HttpHeaderValues HttpExpectationFailedEvent DefaultFullHttpResponse HttpResponseStatus FullHttpResponse HttpResponse HttpStatusClass HttpHeaders EmptyHttpHeaders FullHttpRequest DefaultFullHttpRequest HttpMethod)
            (io.netty.channel ChannelPipeline)
-           (io.netty.buffer Unpooled ByteBuf)
-           (javax.swing.text.html HTMLEditorKit$HTMLFactory$BodyBlockView)))
+           (io.netty.buffer Unpooled ByteBuf)))
 
 
 ; Compensate for privacy or package-locality of HttpUtil methods
@@ -25,6 +24,11 @@
     (-> ^HttpResponse msg .status .codeClass (.equals HttpStatusClass/CLIENT_ERROR))
     false))
 
+; HttpMessageUtil
+
+(defn appendFullRequest [^StringBuilder buf ^FullHttpResponse res]
+  ())
+
 ;
 
 (defn response [^HttpResponseStatus s & {:as headers}]
@@ -34,6 +38,7 @@
 
 (defrecord AggregatedFullHttpMessage ; oh the pain
   [^HttpMessage message ^ByteBuf content ^HttpHeaders trailingHeaders]
+
   FullHttpMessage
   (^HttpHeaders trailingHeaders [_] ; https://clojure.atlassian.net/browse/CLJ-906
     (or trailingHeaders EmptyHttpHeaders/INSTANCE))
@@ -53,10 +58,32 @@
   (^FullHttpMessage touch [this ^Object hint] (.touch content hint) this)
   (^FullHttpMessage touch [this] (.touch content) this)
   (^boolean release [_] (.release content))
-  (^boolean release [_ ^int decrement] (.release content decrement)))
+  (^boolean release [_ ^int decrement] (.release content decrement))
   ; copy ... abstract
   ; duplicate
   ; retainedDuplicate))
+
+  FullHttpRequest
+  (^FullHttpRequest copy [this] (.replace this (.copy content)))
+  (^FullHttpRequest duplicate [this] (.replace this (.duplicate content)))
+  (^FullHttpRequest retainedDuplicate [this] (.replace this (.retainedDuplicate content)))
+  (^FullHttpRequest replace [this ^ByteBuf content] ; will `content` resolve correctly?
+    (doto (DefaultFullHttpRequest. (.protocolVersion this) (.method this) (.uri this)
+            content (-> this .headers .copy) (.copy .trailingHeaders))
+      (.setDecoderResult (.decoderResult this))))
+  (^FullHttpRequest retain [this ^int increment] (.retain ^FullHttpMessage this increment) this)
+  (^FullHttpRequest retain [this] (.retain ^FullHttpMessage this) this)
+  (^FullHttpRequest touch [this] (.touch ^FullHttpMessage this) this)
+  (^FullHttpRequest touch [this ^Object hint] (.touch ^FullHttpMessage this hint) this)
+  (^FullHttpMessage setMethod [this ^HttpMethod method] (.setMethod ^HttpRequest message method) this)
+  (^FullHttpRequest setUri [this ^String uri] (.setUri ^HttpRequest message uri) this)
+  (^HttpMethod getMethod [_] (.method ^HttpRequest message))
+  (^String getUri [_] (.uri ^HttpRequest message))
+  (^HttpMethod method [this] (.getMethod this))
+  (^String uri [this] (.getUri this))
+  (^FullHttpRequest setProtocolVersion [this ^HttpVersion version]
+    (.setProtocolVersion ^FullHttpMessage this version) this)
+  (^String toString [this] ()))
 
 (defn HttpObjectAggregator
   "Like netty's HttpObjectAggregator, but aggregates to disk if over threshold size."
