@@ -24,10 +24,10 @@
 
 (defn pipeline
   [^String ws-path
-   {:keys [^int max-content-length
+   {:keys [^int max-content-length ; max HTTP upload
            ^int handshake-timeout
            ^int max-frame-size
-           ^int max-message-size]
+           ^int max-message-size] ; max WS message
     :or {max-content-length (* 1024 1024)
          handshake-timeout (* 5 1000)
          max-frame-size (* 64 1024)
@@ -39,18 +39,21 @@
       (doto (.pipeline ch)
         ; TODO could add selectively according to need
         (.addLast "http" (HttpServerCodec.))
+        ; less network but more memory
+        #_(.addLast "http-compr" (HttpContentCompressor.))
+        #_(.addLast "http-decompr" (HttpContentDecompressor.))
         ; inbound only https://stackoverflow.com/a/38947978/780743
+        ; TODO make own to-disk aggregator? https://github.com/netty/netty/issues/8195
         (.addLast "http-agg" (HttpObjectAggregator. max-content-length))
         (.addLast "streamer" (ChunkedWriteHandler.))
-        (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions below
+        #_ (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions below
         (.addLast "ws" (WebSocketServerProtocolHandler.
                          ; TODO [application] could specify subprotocol?
                          ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
                          ws-path nil true max-frame-size handshake-timeout))
         (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
         (.addLast "ws-handler" (ws/handler (assoc admin :type :ws)))
-        (.addLast "http-handler" (http/handler (assoc admin :type :http)))
-        #_ [HttpContentCompressor HttpContentDecompressor])))) ; less network but more memory
+        (.addLast "http-handler" (http/handler (assoc admin :type :http)))))))
 
 (defn server!
   "Bootstrap a Netty server connected to core.async channels:
@@ -60,10 +63,10 @@
    Clients are tracked in `clients` atom which contains a map of ChannelId -> arbitrary metadata map.
    Clients can be individually evicted (i.e. have their channel closed) using `evict` fn.
    Websocket path defaults to /ws"
-  ([port] (server! port "/ws" {}))
-  ([port ws-path {:keys [in-buffer out-buffer handler-opts]
-                  :or {in-buffer 1 out-buffer 1}
-                  :as opts}]
+  ([port] (server! port {}))
+  ([port {:keys [ws-path in-buffer out-buffer handler-opts]
+          :or {ws-path "/ws" in-buffer 1 out-buffer 1}
+          :as opts}]
    (let [; TODO look at aleph for epoll, thread number specification
          loop-group (NioEventLoopGroup.)
          ; single threaded executor is for group actions

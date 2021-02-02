@@ -5,7 +5,7 @@
                              SimpleChannelInboundHandler ChannelFutureListener ChannelHandler)
            (io.netty.handler.codec.http.websocketx
              TextWebSocketFrame CorruptedWebSocketFrameException WebSocketFrame
-             WebSocketServerProtocolHandler$HandshakeComplete)
+             WebSocketServerProtocolHandler$HandshakeComplete BinaryWebSocketFrame)
            (io.netty.handler.codec TooLongFrameException)))
 
 (defn send! [^ChannelHandlerContext ctx out-sub {:keys [^String text] :as msg}]
@@ -41,13 +41,13 @@
           #_(log/info "clients in userEventTriggered" clients)
           (async/take! out-sub (partial send! ctx out-sub))))) ; first take!, see send! for subsequent
         ; TODO propagate other user events??
-    (channelRead0 [^ChannelHandlerContext ctx
-                   ^WebSocketFrame frame]
+    (channelRead0 [^ChannelHandlerContext ctx ^WebSocketFrame frame]
       ; facilitate backpressure on subsequent reads; requires .read see branches below
       ;(-> ctx .channel .config (.setAutoRead false)) ; Should already be off from http handler channelActive?
       (let [ch (.channel ctx)
             id (.id ch)]
-        (if (instance? TextWebSocketFrame frame)
+        (condp instance? frame
+          TextWebSocketFrame
           (let [text (.text ^TextWebSocketFrame frame)]
             #_(log/debug "received" (count (.text frame)) "characters from"
                 (.remoteAddress ch) "on channel id" (.id ch))
@@ -62,10 +62,12 @@
                           (if val
                             (.read ctx) ; because autoRead is false
                             (log/error "Dropped incoming websocket message because in chan is closed"))))
-              (log/error "Dropped incoming websocket message because in chan is closed" text)))
+              (log/error "Dropped incoming websocket message because in chan is closed" text))
               ; TODO do something about closed in chan? Shutdown?
-          (do (log/info "Dropped incoming websocket message because not text")
-              (.read ctx)))))
+            #_BinaryWebSocketFrame
+            #_(let [data (.data ^BinaryWebSocketFrame frame)])
+            (do (log/info "Dropped incoming websocket message because not text")
+                (.read ctx))))))
     (exceptionCaught [^ChannelHandlerContext ctx
                       ^Throwable cause]
       (condp instance? cause
