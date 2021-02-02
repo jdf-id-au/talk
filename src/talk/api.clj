@@ -19,7 +19,7 @@
            (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler
                                                    WebSocketFrameAggregator)
            (io.netty.handler.codec.http.websocketx.extensions.compression
-             WebSocketServerCompressionHandler)
+                                        WebSocketServerCompressionHandler)
            (io.netty.handler.stream ChunkedWriteHandler)))
 
 (defn pipeline
@@ -44,7 +44,7 @@
         #_(.addLast "http-decompr" (HttpContentDecompressor.))
         ; inbound only https://stackoverflow.com/a/38947978/780743
         ; TODO make own to-disk aggregator? https://github.com/netty/netty/issues/8195
-        (.addLast "http-agg" (HttpObjectAggregator. max-content-length))
+        #_(.addLast "http-agg" (HttpObjectAggregator. max-content-length))
         (.addLast "streamer" (ChunkedWriteHandler.))
         #_ (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions below
         (.addLast "ws" (WebSocketServerProtocolHandler.
