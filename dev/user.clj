@@ -38,6 +38,7 @@
 ; Server internally publishes `out` using :ch topic.
 
 ; Can test file upload POST and PUT with (respectively):
+; Will only be :file if over threshold (default 16KB)
 ; % curl -o POST.pdf --form "fileupload=@file.pdf;filename=hmm.pdf" http://localhost:8125
 ; $ curl -o PUT.pdf -v -T file.pdf http://localhost:8125
 ; TODO:

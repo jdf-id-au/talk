@@ -42,16 +42,20 @@
   [^ChannelHandlerContext ctx keep-alive? ^HttpResponse res ^File file]
    ; after https://github.com/datskos/ring-netty-adapter/blob/master/src/ring/adapter/plumbing.clj and current docs
   (assert (.isFile file))
-  (let [raf (RandomAccessFile. file "r")
+  (let [status (.status res)
+        ok? (= status HttpResponseStatus/OK)
+        keep-alive? (and keep-alive? ok?)
+        raf (RandomAccessFile. file "r")
         len (.length raf)
         ; connection seems to close prematurely when using DFR directly on file - because lazy open?
         region (DefaultFileRegion. (.getChannel raf) 0 len) #_(DefaultFileRegion. file 0 len)
         ; NB breaks if no os support for zero-copy
         hdrs (.headers res)]
+    (HttpUtil/setKeepAlive res keep-alive?)
+    (HttpUtil/setContentLength res len)
     (when-not (.get hdrs HttpHeaderNames/CONTENT_TYPE)
       (some->> file .getName URLConnection/guessContentTypeFromName
         (.set hdrs HttpHeaderNames/CONTENT_TYPE)))
-    (HttpUtil/setContentLength res len)
     ; TODO backpressure?
     (.writeAndFlush ctx res) ; initial line and header
     (let [cf (.writeAndFlush ctx region)] ; encoded into several HttpContents?

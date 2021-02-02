@@ -22,19 +22,6 @@
              WebSocketServerCompressionHandler)
            (io.netty.handler.stream ChunkedWriteHandler)))
 
-;(s/def ::port (s/int-in 1024 65535))
-;; TODO update vs actual opts use below
-;(s/def ::max-frame-size (s/int-in 1024 (* 1024 1024)))
-;(s/def ::max-message-size (s/int-in 1024 (* 10 1024 1024)))
-;(s/def ::buffer (s/int-in 1 1024))
-;(s/def ::in-buffer ::buffer)
-;(s/def ::out-buffer ::buffer)
-;(s/def ::timeout (s/int-in 100 (* 10 1000)))
-;(s/def ::opts (s/keys :opt-un [::max-frame-size
-;                               ::max-message-size
-;                               ::in-buffer
-;                               ::out-buffer]))
-
 (defn pipeline
   [^String ws-path
    {:keys [^int max-content-length
@@ -77,8 +64,6 @@
   ([port ws-path {:keys [in-buffer out-buffer handler-opts]
                   :or {in-buffer 1 out-buffer 1}
                   :as opts}]
-   #_{:pre [(s/valid? ::port port)
-            (s/valid? ::opts opts)]}
    (let [; TODO look at aleph for epoll, thread number specification
          loop-group (NioEventLoopGroup.)
          ; single threaded executor is for group actions
