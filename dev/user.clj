@@ -7,21 +7,24 @@
 #_ (def s (talk/server! 8125))
 #_ ((:close s))
 
-#_ (def echo (go-loop [{:keys [ch connected text method] :as msg} (<! (s :in))]
-               (log/info "successfully <! from server in" msg)
-               (cond
-                 text
-                 (when-not (>! (s :out) {:ch ch :text (str "heard you: " text)})
-                   (log/error "failed to write to ws server out"))
-                 method
-                 (when-not (>! (s :out) {:ch ch :status 200
-                                         :headers {"Content-Encoding" "text/plain"}
-                                         :content (str msg)})
-                   (log/error "failed to write to http server out"))
-                 connected
-                 (log/info "connection" ch connected))
-               (when msg
-                 (recur (<! (s :in))))))
+#_ (def echo
+     (go-loop [{:keys [ch connected text method] :as msg} (<! (s :in))]
+       (log/info "successfully <! from server in" msg)
+       (cond
+         text
+         (when-not (>! (s :out) {:ch ch :text (str "heard you: " text)})
+           (log/error "failed to write to ws server out"))
+         (some-> msg :data :value)
+         (when-not (>! (s :out) {:ch ch :status 200}))
+         method
+         (when-not (>! (s :out) {:ch ch :status 200
+                                 :headers {"Content-Encoding" "text/plain"}
+                                 :content (str msg)})
+           (log/error "failed to write to http server out"))
+         connected
+         (log/info "connection" ch connected))
+       (when msg
+         (recur (<! (s :in))))))
 
 ; Server application can internally publish `in` using topic extracted from @clients :type via <ChannelId>
 ; e.g. yielding {:ch <ChannelId> :method :GET ...} for http

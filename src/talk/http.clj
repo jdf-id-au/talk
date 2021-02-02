@@ -2,24 +2,26 @@
   (:require [talk.common :as common]
             [clojure.tools.logging :as log]
             [clojure.core.async :as async :refer [go go-loop chan <!! >!! <! >!
-                                                  put! close! alt! alt!!]])
+                                                  put! close! alt! alt!!]]
+            [clojure.string :as str])
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
-                             ChannelHandlerContext ChannelFutureListener ChannelOption DefaultFileRegion)
+                             ChannelHandlerContext ChannelFutureListener ChannelOption
+                             DefaultFileRegion)
            (io.netty.handler.codec.http HttpUtil
                                         DefaultFullHttpResponse DefaultHttpResponse
                                         HttpResponseStatus
                                         FullHttpRequest FullHttpResponse
                                         HttpHeaderNames QueryStringDecoder HttpMethod HttpResponse)
            (io.netty.util CharsetUtil)
-           (io.netty.handler.codec.http.cookie ServerCookieDecoder ServerCookieEncoder)
+           (io.netty.handler.codec.http.cookie ServerCookieDecoder ServerCookieEncoder Cookie)
            (io.netty.handler.codec.http.multipart HttpPostRequestDecoder
                                                   InterfaceHttpData
                                                   DefaultHttpDataFactory
                                                   FileUpload Attribute
                                                   DiskFileUpload DiskAttribute
                                                   MixedFileUpload MixedAttribute)
-           (java.io File RandomAccessFile)
+           (java.io File)
            (java.net URLConnection)))
 
 ; after https://netty.io/4.1/xref/io/netty/example/http/websocketx/server/WebSocketIndexPageHandler.html
@@ -91,8 +93,7 @@
                         base {:charset (.getCharset f)
                               :client-filename (.getFilename f)
                               :content-type (.getContentType f)
-                              :content-transfer-encoding (.getContentTransferEncoding f)
-                              :charset (.getCharset f)}]
+                              :content-transfer-encoding (.getContentTransferEncoding f)}]
                     (if (.isInMemory f)
                       (assoc base :value (.get f))
                       (assoc base :file (.getFile f))))
@@ -122,25 +123,32 @@
               qsd (-> req .uri QueryStringDecoder.)
               keep-alive? (HttpUtil/isKeepAlive req)
               protocol-version (.protocolVersion req) ; get info from req before released (necessary?)
+              basics {:ch id
+                      :method (-> method .toString keyword)
+                      :path (.path qsd)
+                      :query (.parameters qsd)
+                      :protocol (-> req .protocolVersion .toString)}
+              headers+cookies (some->> req .headers .iteratorAsString iterator-seq
+                                (reduce
+                                  ; Are repeated headers already coalesced by netty?
+                                  ; Does it handle keys case-sensitively?
+                                  (fn [m [k v]]
+                                    (let [lck (-> k str/lower-case keyword)]
+                                      (case lck
+                                        :cookie
+                                        (update m :cookies into
+                                          (for [^Cookie c (.decode ServerCookieDecoder/STRICT v)]
+                                            ; TODO could look at max-age, etc...
+                                            [(.name c) (.value c)]))
+                                        (update-in m [:headers lck] conj v))))
+                                  {}))
               {:keys [post-data ^HttpPostRequestDecoder post-decoder]} (post-handler req)
               request-map
-              (cond-> {:ch id
-                       :method (-> method .toString keyword)
-                       :path (.path qsd)
-                       :query (.parameters qsd)
-                       :protocol (-> req .protocolVersion .toString)
-                       ; TODO drop cookies headers; are repeated headers coalesced?
-                       ; https://stackoverflow.com/questions/4371328/are-duplicate-http-response-headers-acceptable#:~:text=Yes&text=So%2C%20multiple%20headers%20with%20the,comma%2Dseparated%20list%20of%20values.
-                       :headers (->> req .headers .iteratorAsString iterator-seq
-                                  (into {} (map (fn [[k v]] [(keyword k) v]))))
-                       :cookies (some->>
-                                  (some-> req .headers (.get HttpHeaderNames/COOKIE))
-                                  (.decode ServerCookieDecoder/STRICT)
-                                  (into {} (map (fn [c] [(.name c) (.value c)]))))
-                       ; TODO check content type and charset if specified... or just stream bytes?
-                       ; Not really fair to expect application to do.
-                       :content (some-> req .content (.toString CharsetUtil/UTF_8))}
-                post-data (assoc :data post-data))]
+              (cond-> (merge basics headers+cookies)
+                post-data (assoc :data post-data)
+                ; TODO check content type and charset if specified... or just stream bytes?
+                ; Not really fair to expect application to do.
+                (not post-decoder) (assoc :content (some-> req .content (.toString CharsetUtil/UTF_8))))]
           (go
             (if (>! in request-map)
               (try
