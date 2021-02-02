@@ -5,16 +5,22 @@
                                                   put! close! alt! alt!!]])
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
-                             ChannelHandlerContext ChannelFutureListener ChannelOption)
+                             ChannelHandlerContext ChannelFutureListener ChannelOption DefaultFileRegion)
            (io.netty.handler.codec.http HttpUtil
-                                        DefaultFullHttpResponse
+                                        DefaultFullHttpResponse DefaultHttpResponse
                                         HttpResponseStatus
                                         FullHttpRequest FullHttpResponse
-                                        HttpHeaderNames QueryStringDecoder HttpMethod)
+                                        HttpHeaderNames QueryStringDecoder HttpMethod HttpResponse)
            (io.netty.util CharsetUtil)
            (io.netty.handler.codec.http.cookie ServerCookieDecoder ServerCookieEncoder)
-           (io.netty.handler.codec.http.multipart HttpPostRequestDecoder Attribute
-                                                  InterfaceHttpData FileUpload DefaultHttpDataFactory DiskFileUpload DiskAttribute HttpDataFactory MemoryAttribute MixedAttribute MixedFileUpload InterfaceHttpPostRequestDecoder)))
+           (io.netty.handler.codec.http.multipart HttpPostRequestDecoder
+                                                  InterfaceHttpData
+                                                  DefaultHttpDataFactory
+                                                  FileUpload Attribute
+                                                  DiskFileUpload DiskAttribute
+                                                  MixedFileUpload MixedAttribute)
+           (java.io File RandomAccessFile)
+           (java.net URLConnection)))
 
 ; after https://netty.io/4.1/xref/io/netty/example/http/websocketx/server/WebSocketIndexPageHandler.html
 (defn respond!
@@ -30,44 +36,67 @@
       ; Strictly should wait for this before alt! takes next from out-sub?
       (when-not keep-alive? (.addListener cf ChannelFutureListener/CLOSE)))))
 
+(defn stream!
+  [^ChannelHandlerContext ctx keep-alive? ^HttpResponse res ^File file]
+   ; after https://github.com/datskos/ring-netty-adapter/blob/master/src/ring/adapter/plumbing.clj and current docs
+  (assert (.isFile file))
+  (let [len (.length file)
+        region (DefaultFileRegion. file 0 len)
+        ; NB breaks if no os support for zero-copy
+        hdrs (.headers res)]
+    (when-not (.get hdrs "Content-Type")
+      (.set hdrs "Content-Type" (URLConnection/guessContentTypeFromName (.getName file))))
+    (HttpUtil/setContentLength res len)
+    ; TODO backpressure?
+    ; FIXME write on channel or context?
+    (.writeAndFlush ctx res) ; initial line and header
+    (let [cf (.writeAndFlush ctx region)] ; encoded into several HttpContents?
+      (.addListener cf
+        (reify ChannelFutureListener ; FIXME progress? ChannelProgressiveFutureListener ?
+          (operationComplete [_ _]
+            (.release region))))
+      (when-not keep-alive? (.addListener cf ChannelFutureListener/CLOSE)))))
+
 (def post-handler
-  "Handle HTTP POST data.
+  "Handle HTTP POST data. Does not apply charset automatically.
    NB data >16kB will be stored in tempfiles, which will be lost on JVM shutdown.
    Must destroy decoder after response sent; this will also remove tempfiles."
-  (let [; after https://gist.github.com/breznik/6215834
-        ; TODO protect file uploads somehow
-        data-factory (DefaultHttpDataFactory.) ; memory if <16kB, else disk
-        _ (set! (. DiskFileUpload deleteOnExitTemporaryFile) true) ; same as default
-        _ (set! (. DiskFileUpload baseDirectory) nil) ; system temp directory
-        _ (set! (. DiskAttribute deleteOnExitTemporaryFile) true)
-        _ (set! (. DiskAttribute baseDirectory) nil)]
+  ; after https://gist.github.com/breznik/6215834
+  ; TODO protect file uploads somehow
+  (let [data-factory (DefaultHttpDataFactory.)] ; memory if <16kB, else disk
+    (set! (. DiskFileUpload deleteOnExitTemporaryFile) true) ; same as default
+    (set! (. DiskFileUpload baseDirectory) nil) ; system temp directory
+    (set! (. DiskAttribute deleteOnExitTemporaryFile) true)
+    (set! (. DiskAttribute baseDirectory) nil)
     (fn [req]
       (when (= (.method req) HttpMethod/POST)
-        (let [decoder (HttpPostRequestDecoder. data-factory req)
-              parsed
-              (into {}
-                (for [^InterfaceHttpData d (.getBodyHttpDatas decoder)
-                      :let [base {:type (.getHttpDataType d)}]]
-                  [(.getName d)
-                   (condp instance? d
-                     ; Only if application/x-www-form-urlencoded ?
-                     Attribute
-                     (let [a ^MixedAttribute d]
-                       (if (.isInMemory a)
-                         (assoc base :value (.get a))
-                         (assoc base :file (.getFile a))))
-                     FileUpload
-                     (let [f ^MixedFileUpload d
-                           fb (assoc base
-                                :client-filename (.getFilename f)
-                                :content-type (.getContentType f)
-                                :content-transfer-encoding (.getContentTransferEncoding f))]
-                       (if (.isInMemory f)
-                         (assoc fb :value (.get f))
-                         (assoc fb :file (.getFile f))))
-                     (do (log/info "Unsupported http body data type " (.getHttpDataType d))
-                         base))]))]
-          {:post-data parsed :post-decoder decoder})))))
+        (let [decoder (HttpPostRequestDecoder. data-factory req)]
+          {:post-decoder decoder
+           :post-data
+           (into {}
+             (for [^InterfaceHttpData d (.getBodyHttpDatas decoder)]
+               [(.getName d)
+                (condp instance? d
+                  ; Only if application/x-www-form-urlencoded ?
+                  Attribute
+                  (let [a ^MixedAttribute d
+                        base {:charset (.getCharset a)}]
+                    (if (.isInMemory a)
+                      ; NB puts onus on application to apply charset
+                      ; e.g. (slurp value :encoding "UTF-8")
+                      (assoc base :value (.get a))
+                      (assoc base :file (.getFile a))))
+                  FileUpload
+                  (let [f ^MixedFileUpload d
+                        base {:charset (.getCharset f)
+                              :client-filename (.getFilename f)
+                              :content-type (.getContentType f)
+                              :content-transfer-encoding (.getContentTransferEncoding f)
+                              :charset (.getCharset f)}]
+                    (if (.isInMemory f)
+                      (assoc base :value (.get f))
+                      (assoc base :file (.getFile f))))
+                  (log/info "Unsupported http body data type " (.getHttpDataType d)))]))})))))
 
 (defn ^ChannelHandler handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
@@ -117,41 +146,50 @@
               (try
                 (if-let [{:keys [status headers cookies content]}
                          (alt! out-sub ([v] v) (async/timeout handler-timeout) nil)]
-                  ; TODO zero copy file streaming response after
-                  ; https://github.com/datskos/ring-netty-adapter/blob/master/src/ring/adapter/plumbing.clj
-                  (let [buf (condp #(%1 %2) content
-                              string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
-                              nil? Unpooled/EMPTY_BUFFER
-                              bytes? (Unpooled/copiedBuffer ^bytes content))
-                        res (DefaultFullHttpResponse.
-                              protocol-version
-                              (HttpResponseStatus/valueOf status)
-                              ^ByteBuf buf)
-                        hdrs (.headers res)]
-                    (doseq [[k v] headers]
-                      (.set hdrs (name k) v))
-                    ; TODO need to support repeated headers (other than Set-Cookie ?)
-                    ; TODO trailing headers? for chunked responses? Interaction with HttpObjectAggregator?
-                    (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
-                      (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
-                    (respond! ctx keep-alive? res)
-                    (when post-decoder (.destroy post-decoder))
+                  (do
+                    (if (instance? File content) ; TODO add support for other streaming sources
+                      ; Streaming:
+                      (let [res (DefaultHttpResponse.
+                                  protocol-version
+                                  (HttpResponseStatus/valueOf status))
+                            hdrs (.headers res)]
+                        (doseq [[k v] headers] (.set hdrs (name k) v))
+                        (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
+                          (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
+                        ; TODO trailing headers?
+                        (stream! ctx keep-alive? res content))
+                      ; Non-streaming:
+                      (let [buf (condp #(%1 %2) content
+                                  string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
+                                  nil? Unpooled/EMPTY_BUFFER
+                                  bytes? (Unpooled/copiedBuffer ^bytes content))
+                            res (DefaultFullHttpResponse.
+                                  protocol-version
+                                  (HttpResponseStatus/valueOf status)
+                                  ^ByteBuf buf)
+                            hdrs (.headers res)]
+                        (doseq [[k v] headers] (.set hdrs (name k) v))
+                        ; TODO need to support repeated headers (other than Set-Cookie ?)
+                        (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
+                          (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
+                        (respond! ctx keep-alive? res)))
+                    (some-> post-decoder .destroy)
                     (.read ctx)) ; because autoRead is false
                   (do (log/error "Dropped incoming http request because of out chan timeout")
-                      (when post-decoder (.destroy post-decoder))
+                      (some-> post-decoder .destroy)
                       (respond! ctx false (DefaultFullHttpResponse.
                                             protocol-version
                                             HttpResponseStatus/SERVICE_UNAVAILABLE
                                             Unpooled/EMPTY_BUFFER))))
                 (catch Exception e
                   (log/error "Error in http response handler" e)
-                  (when post-decoder (.destroy post-decoder))
+                  (some-> post-decoder .destroy)
                   (respond! ctx false (DefaultFullHttpResponse.
                                         protocol-version
                                         HttpResponseStatus/INTERNAL_SERVER_ERROR
                                         Unpooled/EMPTY_BUFFER))))
               (do (log/error "Dropped incoming http request because in chan is closed")
-                  (when post-decoder (.destroy post-decoder))
+                  (some-> post-decoder .destroy)
                   (respond! ctx false (DefaultFullHttpResponse.
                                         protocol-version
                                         HttpResponseStatus/SERVICE_UNAVAILABLE
