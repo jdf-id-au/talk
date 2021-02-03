@@ -66,10 +66,11 @@
   "Handle HTTP POST/PUT/PATCH data. Does not apply charset automatically.
    NB data >16kB will be stored in tempfiles, which will be lost on JVM shutdown.
    Must cleanup after response sent; this will also remove tempfiles."
-  ; NB limited by needing to fit in memory...
-  ; (I failed to reimplement HttpObjectAggregator to have disk backing)
+  ; NB limited by needing to fit in memory because of HttpObjectAggregator,
+  ; which I failed to reimplement to have disk backing.
   ; after https://gist.github.com/breznik/6215834
   ; TODO protect against file upload abuse somehow
+  ; (partly protected by max-content-length and backpressure)
   (let [data-factory (DefaultHttpDataFactory.)] ; memory if <16kB, else disk
     (set! (. DiskFileUpload deleteOnExitTemporaryFile) true) ; same as default
     (set! (. DiskFileUpload baseDirectory) nil) ; system temp directory

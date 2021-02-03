@@ -31,6 +31,9 @@
    Send outgoing text messages from `out-sub`.
    Both asynchronously and with backpressure."
   ; FIXME not taking advantage of zero-copy, but somewhat protected by backpressure.
+  ; Copying means twice the memory is temporarily needed, until netty bytebuf released.
+  ; Limited by needing to fit in (half of available) memory because of WebSocketFrameAggregator.
+  ; Benefit is application not needing to worry about manual memory management...
   [{:keys [in type clients] :as admin}]
   (proxy [SimpleChannelInboundHandler] [WebSocketFrame]
     (userEventTriggered [^ChannelHandlerContext ctx evt]
