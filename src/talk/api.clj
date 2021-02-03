@@ -23,20 +23,22 @@
                                         WebSocketServerCompressionHandler)
            (io.netty.handler.stream ChunkedWriteHandler)))
 
-(s/def ::ch #(instance? ChannelId %))
-(s/def ::connection (s/cat ::ch ::ch ::connected boolean?))
-(s/def ::method #{:get :post :put :patch :delete :head :options}) ; TODO #{} from java enum?
-(s/def ::path string?) ; TODO improve
-(s/def ::query string?) ;
-(s/def ::protocol string?) ; TODO #{} from java enum?
-(s/def ::headers (s/every-kv keyword? (s/or ::single string? ::multiple vector?))) ; TODO lower kw
-(s/def ::cookies (s/every-kv string? string?))
-
-(s/def ::data (s/coll-of (s/or ::attr ::file ::put) :kind vector?))
-(s/def ::http (s/cat ::ch ::ch ::req (s/keys :req-un [::method ::path ::query ::protocol ::headers]
-                                       :opt-un [::cookies ::data ::content])))
-(s/def ::ws (s/cat ::ch ::ch ::msg (s/alt ::ws-data bytes? ::ws-text string?)))
-(s/def ::message (s/or ::connection ::http ::ws))
+;(s/def ::ch #(instance? ChannelId %))
+;(s/def ::connection (s/cat ::ch ::ch ::connected boolean?))
+;
+;(s/def ::method #{:get :post :put :patch :delete :head :options}) ; TODO #{} from java enum?
+;(s/def ::path string?) ; TODO improve
+;(s/def ::query string?) ;
+;(s/def ::protocol string?) ; TODO #{} from java enum?
+;(s/def ::headers (s/every-kv keyword? (s/or ::single string? ::multiple vector?))) ; TODO lower kw
+;(s/def ::cookies (s/every-kv string? string?))
+;(s/def ::data (s/coll-of (s/or ::attr ::file ::put) :kind vector?))
+;(s/def ::http (s/cat ::ch ::ch ::req (s/keys :req-un [::method ::path ::query ::protocol ::headers]
+;                                       :opt-un [::cookies ::data ::content])))
+;
+;(s/def ::ws (s/cat ::ch ::ch ::msg (s/alt ::ws-data bytes? ::ws-text string?)))
+;
+;(s/def ::message (s/or ::connection ::http ::ws))
 
 (defn pipeline
   [^String ws-path
