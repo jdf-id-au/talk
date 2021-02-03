@@ -22,7 +22,8 @@
                                                   DiskFileUpload DiskAttribute
                                                   MixedFileUpload MixedAttribute)
            (java.io File RandomAccessFile)
-           (java.net URLConnection)))
+           (java.net URLConnection)
+           (io.netty.handler.stream ChunkedFile)))
 
 ; after https://netty.io/4.1/xref/io/netty/example/http/websocketx/server/WebSocketIndexPageHandler.html
 (defn respond!
@@ -48,8 +49,8 @@
         raf (RandomAccessFile. file "r")
         len (.length raf)
         ; connection seems to close prematurely when using DFR directly on file - because lazy open?
-        region (DefaultFileRegion. (.getChannel raf) 0 len) #_(DefaultFileRegion. file 0 len)
-        ; NB breaks if no os support for zero-copy
+        region (DefaultFileRegion. (.getChannel raf) 0 len) #_(DefaultFileRegion. file 0 len) #_ (ChunkedFile. raf)
+        ; NB breaks if no os support for zero-copy; might not work with *netty's* ssl
         hdrs (.headers res)]
     (HttpUtil/setKeepAlive res keep-alive?)
     (HttpUtil/setContentLength res len)

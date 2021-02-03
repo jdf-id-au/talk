@@ -13,9 +13,10 @@
            (io.netty.channel.socket.nio NioServerSocketChannel)
            (io.netty.util.concurrent GlobalEventExecutor)
            (java.net InetSocketAddress)
-           (io.netty.handler.codec.http HttpServerCodec HttpObjectAggregator
+           (io.netty.handler.codec.http HttpServerCodec
                                         HttpContentCompressor HttpContentDecompressor
-                                        HttpContentEncoder HttpContentDecoder)
+                                        HttpContentEncoder HttpContentDecoder
+                                        HttpObjectAggregator)
            (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler
                                                    WebSocketFrameAggregator)
            (io.netty.handler.codec.http.websocketx.extensions.compression
@@ -43,8 +44,8 @@
         #_(.addLast "http-compr" (HttpContentCompressor.))
         #_(.addLast "http-decompr" (HttpContentDecompressor.))
         ; inbound only https://stackoverflow.com/a/38947978/780743
-        ; TODO make own to-disk aggregator? https://github.com/netty/netty/issues/8195
-        #_(.addLast "http-agg" (HttpObjectAggregator. max-content-length))
+        ; might need to be at channelRead0 level rather than pipeline
+        (.addLast "http-agg" (HttpObjectAggregator. max-content-length))
         (.addLast "streamer" (ChunkedWriteHandler.))
         #_ (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions below
         (.addLast "ws" (WebSocketServerProtocolHandler.
