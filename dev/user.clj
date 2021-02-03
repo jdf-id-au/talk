@@ -7,11 +7,11 @@
 #_ ((:close s))
 #_ (def s (talk/server! 8125))
 #_ (def echo
-     (go-loop [{:keys [ch connected text method data] :as msg} (<! (s :in))]
+     (go-loop [{:keys [ch connected ws-text ws-data method data] :as msg} (<! (s :in))]
        (log/info "successfully <! from server in" msg)
        (cond
-         text
-         (when-not (>! (s :out) {:ch ch :text (str "heard you: " text)})
+         ws-text
+         (when-not (>! (s :out) {:ch ch :ws-text (str "heard you: " ws-text)})
            (log/error "failed to write to ws server out"))
 
          (some->> data (map :file) seq)

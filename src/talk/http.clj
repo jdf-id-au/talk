@@ -159,7 +159,7 @@
                   (fn [m [k v]]
                     (let [lck (-> k str/lower-case keyword)]
                       (case lck
-                        :cookie
+                        :cookie ; TODO omit if empty
                         (update m :cookies into
                           (for [^Cookie c (.decode ServerCookieDecoder/STRICT v)]
                             ; TODO could look at max-age, etc...

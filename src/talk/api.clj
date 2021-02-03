@@ -6,7 +6,7 @@
             [hato.websocket :as hws]
             [clojure.spec.alpha :as s])
   (:import (io.netty.bootstrap ServerBootstrap)
-           (io.netty.channel ChannelInitializer)
+           (io.netty.channel ChannelInitializer ChannelId)
            (io.netty.channel.nio NioEventLoopGroup)
            (io.netty.channel.group DefaultChannelGroup)
            (io.netty.channel.socket SocketChannel)
@@ -16,12 +16,27 @@
            (io.netty.handler.codec.http HttpServerCodec
                                         HttpContentCompressor HttpContentDecompressor
                                         HttpContentEncoder HttpContentDecoder
-                                        HttpObjectAggregator)
+                                        HttpObjectAggregator HttpVersion)
            (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler
                                                    WebSocketFrameAggregator)
            (io.netty.handler.codec.http.websocketx.extensions.compression
                                         WebSocketServerCompressionHandler)
            (io.netty.handler.stream ChunkedWriteHandler)))
+
+(s/def ::ch #(instance? ChannelId %))
+(s/def ::connection (s/cat ::ch ::ch ::connected boolean?))
+(s/def ::method #{:get :post :put :patch :delete :head :options}) ; TODO #{} from java enum?
+(s/def ::path string?) ; TODO improve
+(s/def ::query string?) ;
+(s/def ::protocol string?) ; TODO #{} from java enum?
+(s/def ::headers (s/every-kv keyword? (s/or ::single string? ::multiple vector?))) ; TODO lower kw
+(s/def ::cookies (s/every-kv string? string?))
+
+(s/def ::data (s/coll-of (s/or ::attr ::file ::put) :kind vector?))
+(s/def ::http (s/cat ::ch ::ch ::req (s/keys :req-un [::method ::path ::query ::protocol ::headers]
+                                       :opt-un [::cookies ::data ::content])))
+(s/def ::ws (s/cat ::ch ::ch ::msg (s/alt ::ws-data bytes? ::ws-text string?)))
+(s/def ::message (s/or ::connection ::http ::ws))
 
 (defn pipeline
   [^String ws-path
@@ -63,7 +78,9 @@
    Client connections and disconnections appear on `in`.
    Clients are tracked in `clients` atom which contains a map of ChannelId -> arbitrary metadata map.
    Clients can be individually evicted (i.e. have their channel closed) using `evict` fn.
-   Websocket path defaults to /ws"
+   Close server by calling `close`.
+   Websocket path defaults to /ws."
+  ; TODO adjust messages to be suitable for spec conformation (see above)
   ([port] (server! port {}))
   ([port {:keys [ws-path in-buffer out-buffer handler-opts]
           :or {ws-path "/ws" in-buffer 1 out-buffer 1}
