@@ -146,8 +146,8 @@
               qsd (-> req .uri QueryStringDecoder.)
               keep-alive? (HttpUtil/isKeepAlive req)
               protocol-version (.protocolVersion req) ; get info from req before released (necessary?)
-              basics {:ch id
-                      :method (-> method .toString keyword)
+              basics {:ch id :type ::request
+                      :method (-> method .toString str/lower-case keyword)
                       :path (.path qsd)
                       :query (.parameters qsd)
                       :protocol (-> req .protocolVersion .toString)}
@@ -173,7 +173,6 @@
                               (assoc hs lck v)))))))
                   {}))
               {:keys [data cleanup] :or {cleanup (constantly nil)}} (upload-handler req)
-              _ (log/debug "data" data)
               request-map
               (cond-> (assoc basics :headers headers :cookies cookies)
                 data (assoc :data data)

@@ -16,29 +16,39 @@
            (io.netty.handler.codec.http HttpServerCodec
                                         HttpContentCompressor HttpContentDecompressor
                                         HttpContentEncoder HttpContentDecoder
-                                        HttpObjectAggregator HttpVersion)
+                                        HttpObjectAggregator HttpVersion DiskHttpObjectAggregator)
            (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler
                                                    WebSocketFrameAggregator)
            (io.netty.handler.codec.http.websocketx.extensions.compression
-                                        WebSocketServerCompressionHandler)
-           (io.netty.handler.stream ChunkedWriteHandler)))
+             WebSocketServerCompressionHandler)
+           (io.netty.handler.stream ChunkedWriteHandler)
+           (java.io File)))
 
-;(s/def ::ch #(instance? ChannelId %))
-;(s/def ::connection (s/cat ::ch ::ch ::connected boolean?))
-;
-;(s/def ::method #{:get :post :put :patch :delete :head :options}) ; TODO #{} from java enum?
-;(s/def ::path string?) ; TODO improve
-;(s/def ::query string?) ;
-;(s/def ::protocol string?) ; TODO #{} from java enum?
-;(s/def ::headers (s/every-kv keyword? (s/or ::single string? ::multiple vector?))) ; TODO lower kw
-;(s/def ::cookies (s/every-kv string? string?))
-;(s/def ::data (s/coll-of (s/or ::attr ::file ::put) :kind vector?))
-;(s/def ::http (s/cat ::ch ::ch ::req (s/keys :req-un [::method ::path ::query ::protocol ::headers]
-;                                       :opt-un [::cookies ::data ::content])))
-;
-;(s/def ::ws (s/cat ::ch ::ch ::msg (s/alt ::ws-data bytes? ::ws-text string?)))
-;
-;(s/def ::message (s/or ::connection ::http ::ws))
+(defn retag [gen-v tag] gen-v) ; copied from jdf/comfort for the moment
+
+(s/def ::ch #(instance? ChannelId %))
+(s/def ::connection (s/cat ::ch ::ch ::connected boolean?))
+
+(s/def ::method #{:get :post :put :patch :delete :head :options}) ; TODO #{} from java enum?
+(s/def ::path string?) ; TODO improve
+(s/def ::query string?) ;
+(s/def ::protocol string?) ; TODO #{} from java enum?
+(s/def ::headers (s/every-kv keyword? (s/or ::single string? ::multiple vector?))) ; TODO lower kw
+(s/def ::cookies (s/every-kv string? string?))
+(s/def ::attr string?)
+(s/def ::file bytes?)
+(s/def ::put bytes?)
+(s/def ::data (s/coll-of (s/or ::attr ::attr ::file ::file ::put ::put) :kind vector?))
+(s/def ::content (s/or ::file #(instance? File %) ::string string? ::bytes bytes? ::nil nil?))
+(s/def ::http (s/cat ::ch ::ch ::req (s/keys :req-un [::method ::path ::query ::protocol ::headers]
+                                       :opt-un [::cookies ::data ::content])))
+
+(s/def ::ws (s/cat ::ch ::ch ::msg (s/alt ::data bytes? ::text string?)))
+
+(s/def ::message (s/or ::connection ::connection ::http ::http ::ws ::ws))
+
+#_ (s/def ::ch int?) ; too bored to come up with gen
+#_ (s/exercise ::message)
 
 (defn pipeline
   [^String ws-path
@@ -62,7 +72,8 @@
         #_(.addLast "http-decompr" (HttpContentDecompressor.))
         ; inbound only https://stackoverflow.com/a/38947978/780743
         ; might need to be at channelRead0 level rather than pipeline
-        (.addLast "http-agg" (HttpObjectAggregator. max-content-length))
+        #_(.addLast "http-agg" (HttpObjectAggregator. max-content-length))
+        (.addLast "http-agg" (DiskHttpObjectAggregator. max-content-length))
         (.addLast "streamer" (ChunkedWriteHandler.))
         #_ (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions below
         (.addLast "ws" (WebSocketServerProtocolHandler.
@@ -81,7 +92,7 @@
    Clients are tracked in `clients` atom which contains a map of ChannelId -> arbitrary metadata map.
    Clients can be individually evicted (i.e. have their channel closed) using `evict` fn.
    Close server by calling `close`.
-   Websocket path defaults to /ws."
+   Websocket path defaults to /ws. Doesn't support Server Sent Events or long polling at present."
   ; TODO adjust messages to be suitable for spec conformation (see above)
   ([port] (server! port {}))
   ([port {:keys [ws-path in-buffer out-buffer handler-opts]

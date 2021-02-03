@@ -12,9 +12,14 @@
         io.netty/netty-resolver-dns {:mvn/version "4.1.51.Final"}
 
         hato/hato {:mvn/version "0.7.1"}}
- :paths ["src"]
+ ; Use IntelliJ to build DiskHttpObjectAggregator:
+ ; Project Structure > Project Settings > Modules > talk > Paths >
+ ; Compiler Output: Use module compile output path >
+ ; Output path: .../talk/classes
+ :paths ["src" "classes"]
  :aliases
- {:dev {:extra-deps {org.clojure/clojure {:mvn/version "1.10.1"}
+ {:dev {:extra-deps {org.clojure/clojure {:mvn/version "1.10.2"}
+                     org.clojure/test.check {:mvn/version "1.1.0"}
                      org.slf4j/slf4j-simple {:mvn/version "1.7.30"}
                      bidi/bidi {:mvn/version "2.1.6"}}
         :extra-paths ["dev" "test"]
