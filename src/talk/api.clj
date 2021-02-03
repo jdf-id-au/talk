@@ -27,28 +27,19 @@
 (defn retag [gen-v tag] gen-v) ; copied from jdf/comfort for the moment
 
 (s/def ::ch #(instance? ChannelId %))
-(s/def ::connection (s/cat ::ch ::ch ::connected boolean?))
 
-(s/def ::method #{:get :post :put :patch :delete :head :options}) ; TODO #{} from java enum?
-(s/def ::path string?) ; TODO improve
-(s/def ::query string?) ;
-(s/def ::protocol string?) ; TODO #{} from java enum?
-(s/def ::headers (s/every-kv keyword? (s/or ::single string? ::multiple vector?))) ; TODO lower kw
-(s/def ::cookies (s/every-kv string? string?))
-(s/def ::attr string?)
-(s/def ::file bytes?)
-(s/def ::put bytes?)
-(s/def ::data (s/coll-of (s/or ::attr ::attr ::file ::file ::put ::put) :kind vector?))
-(s/def ::content (s/or ::file #(instance? File %) ::string string? ::bytes bytes? ::nil nil?))
-(s/def ::http (s/cat ::ch ::ch ::req (s/keys :req-un [::method ::path ::query ::protocol ::headers]
-                                       :opt-un [::cookies ::data ::content])))
+(defmulti message-type :type)
+(defmethod message-type ::connection [_] ::connection) ; spec actually in talk.common
+(defmethod message-type ::http/request [_] ::http/request)
+(defmethod message-type ::ws/text [_] ::ws/text)
+(defmethod message-type ::ws/binary [_] ::ws/binary)
+(s/def ::incoming (s/multi-spec message-type retag))
 
-(s/def ::ws (s/cat ::ch ::ch ::msg (s/alt ::data bytes? ::text string?)))
-
-(s/def ::message (s/or ::connection ::connection ::http ::http ::ws ::ws))
+(s/def ::outgoing any?) ; FIXME
 
 #_ (s/def ::ch int?) ; too bored to come up with gen
-#_ (s/exercise ::message)
+#_ (s/def ::http/file bytes?)
+#_ (s/exercise ::http/request)
 
 (defn pipeline
   [^String ws-path

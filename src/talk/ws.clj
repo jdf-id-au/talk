@@ -1,12 +1,19 @@
 (ns talk.ws
   (:require [clojure.tools.logging :as log]
-            [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close!]])
+            [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close!]]
+            [clojure.spec.alpha :as s])
   (:import (io.netty.channel ChannelHandlerContext
                              SimpleChannelInboundHandler ChannelFutureListener ChannelHandler)
            (io.netty.handler.codec.http.websocketx
              TextWebSocketFrame CorruptedWebSocketFrameException WebSocketFrame
              WebSocketServerProtocolHandler$HandshakeComplete BinaryWebSocketFrame)
            (io.netty.handler.codec TooLongFrameException)))
+
+(s/def :plain/text string?)
+(s/def :plain/data bytes?)
+
+(s/def ::text (s/keys :req-un [:talk.api/ch :plain/text]))
+(s/def ::binary (s/keys :req-un [:talk.api/ch :plain/data]))
 
 (defn send! [^ChannelHandlerContext ctx out-sub {:keys [text data] :as msg}]
   (if msg
@@ -61,14 +68,14 @@
             ; https://clojure.org/guides/core_async_go
             ; put! will throw AssertionError if >1024 requests queue up
             ; Netty prefers async everywhere, which is why I'm not using >!!
-            (when-not (put! in {:ch id :text text} #(if % (.read ctx) (in-err text)))
+            (when-not (put! in {:ch id :type ::text :text text} #(if % (.read ctx) (in-err text)))
               (in-err text)))
               ; TODO do something about closed in chan? Shutdown?
           BinaryWebSocketFrame
           (let [content (.content frame)
                 data (byte-array (.readableBytes content))]
             (.getBytes content 0 data)
-            (when-not (put! in {:ch id :data data} #(if % (.read ctx) (in-err data)))
+            (when-not (put! in {:ch id :type ::binary :data data} #(if % (.read ctx) (in-err data)))
               (in-err data)))
           (do (log/info "Dropped incoming websocket message because unrecognised type")
               (.read ctx)))))

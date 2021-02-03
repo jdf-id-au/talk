@@ -7,7 +7,7 @@
 #_ ((:close s))
 #_ (def s (talk/server! 8125))
 #_ (def echo
-     (go-loop [{:keys [ch connected text method data] :as msg} (<! (s :in))]
+     (go-loop [{:keys [ch type connected text method data] :as msg} (<! (s :in))]
        (log/info "successfully <! from server in" msg)
        (cond
          text

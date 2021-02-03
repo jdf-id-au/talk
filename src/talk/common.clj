@@ -1,9 +1,13 @@
 (ns talk.common
   (:require [clojure.tools.logging :as log]
-            [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close!]])
+            [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close!]]
+            [clojure.spec.alpha :as s])
   (:import (io.netty.channel ChannelHandlerContext ChannelFutureListener)
            (io.netty.channel.group ChannelGroup)
            (java.net InetSocketAddress)))
+
+(s/def ::connected boolean?)
+(s/def :talk.api/connection (s/keys :req-un [:talk.api/ch ::connected]))
 
 (defn track-channel
   "Register channel in `clients` map and report on `in` chan.
@@ -25,13 +29,13 @@
            {:type type
             :out-sub out-sub
             :addr (-> ch ^InetSocketAddress .remoteAddress .getAddress .toString)})
-         (when-not (put! in {:ch id :connected true})
+         (when-not (put! in {:ch id :type :talk.api/connection :connected true})
           (log/error "Unable to report connection because in chan is closed"))
          (.addListener cf
            (reify ChannelFutureListener
              (operationComplete [_ _]
                (swap! clients dissoc id)
-               (when-not (put! in {:ch id :connected false})
+               (when-not (put! in {:ch id :type :talk.api/connection :connected false})
                  (log/error "Unable to report disconnection because in chan is closed")))))
          (catch Exception e
            (log/error "Unable to register channel" ch e)

@@ -3,7 +3,8 @@
             [clojure.tools.logging :as log]
             [clojure.core.async :as async :refer [go go-loop chan <!! >!! <! >!
                                                   put! close! alt! alt!!]]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [clojure.spec.alpha :as s])
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
                              ChannelHandlerContext ChannelFutureListener ChannelOption
@@ -24,6 +25,36 @@
            (java.io File RandomAccessFile)
            (java.net URLConnection)
            (io.netty.handler.stream ChunkedFile)))
+
+; Bit redundant to spec incoming because Netty will have done some sanity checking.
+; Still, good for clarity/gen/testing.
+(s/def ::protocol string?) ; TODO #{} from java enum?
+(s/def ::method #{:get :post :put :patch :delete :head :options :trace}) ; ugh redundant
+(s/def ::path string?) ; TODO improve
+(s/def ::query string?) ;
+(s/def ::headers (s/map-of keyword? (s/or ::single string?
+                                          ::multiple (s/coll-of string? :kind vector?)))) ; TODO lower kw
+(s/def ::cookies (s/map-of string? string?))
+
+(s/def ::name string?)
+(s/def ::client-filename string?)
+(s/def ::content-type string?)
+(s/def ::content-transfer-encoding string?)
+(s/def ::charset (s/nilable keyword?))
+(s/def ::value any?)
+(s/def ::file #(instance? File %))
+(s/def ::type any?)
+(s/def ::attachment (s/keys :req-un [(or (and ::name ::charset (or ::value ::file))
+                                         (and ::name ::charset ::client-filename
+                                              ::content-type ::content-transfer-encoding
+                                              (or ::value ::file))
+                                         (and ::name ::type)
+                                         (and ::charset (or ::value ::file)))]))
+(s/def ::data (s/coll-of ::attachment :kind vector?))
+(s/def ::content (s/or ::file #(instance? File %) ::string string? ::bytes bytes? ::nil nil?))
+
+(s/def ::request (s/keys :req-un [:talk.api/ch ::protocol ::method ::path ::query ::headers]
+                         :opt-un [::cookies ::data]))
 
 ; after https://netty.io/4.1/xref/io/netty/example/http/websocketx/server/WebSocketIndexPageHandler.html
 (defn respond!
@@ -89,7 +120,7 @@
                  ; Only if application/x-www-form-urlencoded ?
                  Attribute
                  (let [a ^MixedAttribute d
-                       base (assoc base :charset (.getCharset a))]
+                       base (assoc base :charset (some-> a .getCharset .toString keyword))]
                    (if (.isInMemory a)
                      ; NB puts onus on application to apply charset
                      ; e.g. (slurp value :encoding "UTF-8")
@@ -97,7 +128,7 @@
                      (assoc base :file (.getFile a))))
                  FileUpload
                  (let [f ^MixedFileUpload d
-                       base (assoc base :charset (.getCharset f)
+                       base (assoc base :charset (some-> f .getCharset .toString keyword)
                                         :client-filename (.getFilename f)
                                         :content-type (.getContentType f)
                                         :content-transfer-encoding (.getContentTransferEncoding f))]
@@ -110,7 +141,7 @@
         (let [mime-type (or (HttpUtil/getMimeType req) "application/octet-stream")
               charset (HttpUtil/getCharset req)
               content-length (HttpUtil/getContentLength req)
-              base {:charset charset}
+              base {:charset (-> charset .toString keyword)}
               u (doto (.createFileUpload data-factory
                         req "PUT data" "see path" mime-type "binary" charset content-length)
                       ; https://stackoverflow.com/a/41572878/780743
@@ -176,8 +207,9 @@
               request-map
               (cond-> (assoc basics :headers headers :cookies cookies)
                 data (assoc :data data)
-                (not data) (assoc :content (some-> req .content
-                                             (.toString (HttpUtil/getCharset req)))))]
+                ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
+                #_#_(not data) (assoc :content (some-> req .content
+                                                 (.toString (HttpUtil/getCharset req)))))]
           (go
             (if (>! in request-map)
               (try
