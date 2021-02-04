@@ -2,12 +2,20 @@
   (:require [talk.api :as talk]
             [bidi.bidi :as bidi]
             [clojure.core.async :as async :refer [chan go go-loop thread >! <! >!! <!! alt! timeout]]
-            [clojure.tools.logging :as log]))
+            [clojure.tools.logging :as log]
+            [clojure.pprint :as pprint]))
 
 #_ ((:close s))
 #_ (def s (talk/server! 8125 {:max-content-length (* 5 1024 1024 1024)}))
+#_ (def inspect
+     (go-loop [{:keys [ch connected text method data] :as msg} (<! (s :in))]
+       (tap> ["received" msg])
+       (when-let [[{:keys [file]}] data]
+         (when file (tap> ["file length" (.length file)])))
+       (>! (s :out) {:ch ch :status 200 :content (some-> data first :file)})
+       (when msg (recur (<! (s :in))))))
 #_ (def echo
-     (go-loop [{:keys [ch type connected text method data] :as msg} (<! (s :in))]
+     (go-loop [{:keys [ch connected text method data] :as msg} (<! (s :in))]
        (log/info "successfully <! from server in" msg)
        (cond
          text
@@ -29,8 +37,15 @@
        (when msg
          (recur (<! (s :in))))))
 
+; Status:
+; http requests with body < threshold (therefore going to memory) seem fine
+; larger ones (therefore going to file) seem to come in but not get stored properly (or deleted too soon?)
+; *** need to get upload-handler to look at Attr... file rather than a buffer?? (or up the chain)
+
+(add-tap pprint/pprint)
+
 ; Server application can internally publish `in` using topic extracted from @clients :type via <ChannelId>
-; e.g. yielding {:ch <ChannelId> :method :GET ...} for http
+; e.g. yielding {:ch <ChannelId> :method :get ...} for http
 ; or {:ch <ChannelId> :text "..."} for ws
 ; Server application can send `out`
 ; e.g. {:ch <ChannelId> :status 200 :headers ...} for http

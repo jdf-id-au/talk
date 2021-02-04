@@ -2,6 +2,7 @@ package io.netty.handler.codec;
 
 import io.netty.buffer.ByteBuf;
 
+import java.io.File;
 import java.io.IOException;
 
 /**
@@ -11,4 +12,7 @@ import java.io.IOException;
  */
 public interface MixedData {
     void addContent(ByteBuf buffer, boolean last) throws IOException;
+    byte[] get() throws IOException;
+    boolean isInMemory();
+    File getFile() throws IOException;
 }

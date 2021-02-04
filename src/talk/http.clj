@@ -14,7 +14,8 @@
                                         DefaultFullHttpResponse DefaultHttpResponse
                                         HttpResponseStatus
                                         FullHttpRequest FullHttpResponse
-                                        HttpHeaderNames QueryStringDecoder HttpMethod HttpResponse)
+                                        HttpHeaderNames QueryStringDecoder HttpMethod HttpResponse
+                                        DiskHttpObjectAggregator$AggregatedFullHttpRequest)
            (io.netty.util CharsetUtil)
            (io.netty.handler.codec.http.cookie ServerCookieDecoder ServerCookieEncoder Cookie)
            (io.netty.handler.codec.http.multipart HttpPostRequestDecoder
@@ -25,7 +26,8 @@
                                                   MixedFileUpload MixedAttribute)
            (java.io File RandomAccessFile)
            (java.net URLConnection)
-           (io.netty.handler.stream ChunkedFile)))
+           (io.netty.handler.stream ChunkedFile)
+           (io.netty.handler.codec MixedData)))
 
 ; Bit redundant to spec incoming because Netty will have done some sanity checking.
 ; Still, good for clarity/gen/testing.
@@ -53,7 +55,7 @@
                                               (or ::value ::file))
                                          (and ::name ::type)
                                          (and ::charset (or ::value ::file)))]))
-(s/def ::data (s/coll-of ::attachment :kind vector?))
+(s/def ::data (s/nilable (s/coll-of ::attachment :kind vector?)))
 (s/def ::content (s/or ::file ::file ::string string? ::bytes bytes? ::nil nil?))
 
 ; Permissive receive, doesn't enforce HTTP semantics
@@ -127,13 +129,13 @@
     (set! (. DiskFileUpload baseDirectory) nil) ; system temp directory
     (set! (. DiskAttribute deleteOnExitTemporaryFile) true)
     (set! (. DiskAttribute baseDirectory) nil)
-    (fn [^FullHttpRequest req]
+    (fn [^DiskHttpObjectAggregator$AggregatedFullHttpRequest req]
       (condp contains? (.method req)
         #{HttpMethod/POST}
         (let [decoder (HttpPostRequestDecoder. data-factory req)]
           {:cleanup #(.destroy decoder)
            :data
-           (into []
+           (some->>
              (for [^InterfaceHttpData d (.getBodyHttpDatas decoder)
                    :let [base {:name (.getName d)}]]
                (condp instance? d
@@ -156,20 +158,18 @@
                      (assoc base :value (.get f))
                      (assoc base :file (.getFile f))))
                  (log/info "Unsupported http body data type "
-                   (assoc base :type (.getHttpDataType d))))))})
+                   (assoc base :type (.getHttpDataType d)))))
+             seq (into []))})
         #{HttpMethod/PUT HttpMethod/PATCH}
         (let [mime-type (or (HttpUtil/getMimeType req) "application/octet-stream")
               charset (HttpUtil/getCharset req)
               content-length (HttpUtil/getContentLength req)
-              base {:charset (-> charset .toString keyword)}
-              u (doto (.createFileUpload data-factory
-                        req "PUT data" "see path" mime-type "binary" charset content-length)
-                      ; https://stackoverflow.com/a/41572878/780743
-                      (.setContent (.content (.retain req))))]
+              base {:charset (-> charset .toString keyword)}]
+          ; Arrgh file is exactly 9KB no matter how long input! (once above threshold for to-disk)
           {:cleanup #(.cleanRequestHttpData data-factory req)
-           :data (vector (if (.isInMemory u)
-                           (assoc base :value (.get u))
-                           (assoc base :file (.getFile u))))})
+           :data (vector (if (.isInMemory req)
+                           (assoc base :value (.get ^MixedData (.retain req)))
+                           (assoc base :file (.getFile ^MixedData (.retain req)))))})
         ; else
         nil))))
 

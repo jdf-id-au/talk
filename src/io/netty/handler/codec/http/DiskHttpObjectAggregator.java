@@ -33,6 +33,7 @@ import io.netty.util.Attribute;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
+import java.io.File;
 import java.io.IOException;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.CONNECTION;
@@ -247,7 +248,8 @@ public class DiskHttpObjectAggregator
             this.message = message;
             this.storage = new MixedAttribute("aggregator", DefaultHttpDataFactory.MINSIZE);
             try {
-                storage.setContent(content);
+                //storage.setContent(content); // (potentially) misleadingly does setCompleted()
+                storage.addContent(content, false);
             } catch (IOException e) {
                 logger.error("Unable to create aggregator", e);
             }
@@ -255,7 +257,29 @@ public class DiskHttpObjectAggregator
         }
 
         public void addContent(ByteBuf buffer, boolean last) throws IOException {
-            this.storage.addContent(buffer, last);
+            this.storage.addContent(buffer, last); // misleadingly setCompleted() in AMHD
+            logger.info(
+                " buffer " + buffer.readableBytes() +
+                " last " + last +
+                " defined length " + this.storage.definedLength() +
+                " storage length " + this.storage.length() + // seemingly 8KB chunks
+                " isInMemory " + this.storage.isInMemory() +
+                " isCompleted " + this.storage.isCompleted() + // misleadingly? true when initially in memory
+                " getFile " + (this.storage.isInMemory() ? "n/a" : this.storage.getFile()) +
+                " file length " + (this.storage.isInMemory() ? "n/a" :this.storage.getFile().length() )
+            );
+        }
+
+        public byte[] get() throws IOException {
+            return this.storage.get();
+        }
+
+        public boolean isInMemory() {
+            return this.storage.isInMemory();
+        }
+
+        public File getFile() throws IOException {
+            return this.storage.getFile();
         }
 
         @Override
@@ -315,41 +339,41 @@ public class DiskHttpObjectAggregator
 
         @Override
         public int refCnt() {
-            return this.storage.content().refCnt();
+            return this.storage.refCnt();
         }
 
         @Override
         public FullHttpMessage retain() {
-            this.storage.content().retain();
+            this.storage.retain();
             return this;
         }
 
         @Override
         public FullHttpMessage retain(int increment) {
-            this.storage.content().retain(increment);
+            this.storage.retain(increment);
             return this;
         }
 
         @Override
         public FullHttpMessage touch(Object hint) {
-            this.storage.content().touch(hint);
+            this.storage.touch(hint);
             return this;
         }
 
         @Override
         public FullHttpMessage touch() {
-            this.storage.content().touch();
+            this.storage.touch();
             return this;
         }
 
         @Override
         public boolean release() {
-            return this.storage.content().release();
+            return this.storage.release();
         }
 
         @Override
         public boolean release(int decrement) {
-            return this.storage.content().release(decrement);
+            return this.storage.release(decrement);
         }
 
         @Override
