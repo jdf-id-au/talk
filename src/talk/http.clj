@@ -9,7 +9,7 @@
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
                              ChannelHandlerContext ChannelFutureListener ChannelOption
-                             DefaultFileRegion)
+                             DefaultFileRegion ChannelInboundHandler)
            (io.netty.handler.codec.http HttpUtil
                                         DefaultFullHttpResponse DefaultHttpResponse
                                         HttpResponseStatus
@@ -295,3 +295,19 @@
     (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
       (log/error "Error in http handler" cause)
       (.close ctx))))
+
+(defn ^ChannelInboundHandler unaggregated-handler
+  "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub` or timeout."
+  {:keys [clients in handler-timeout]
+   :or {handler-timeout (* 5 1000)}
+   :as admin}
+  (reify ChannelInboundHandler
+    (channelRegistered [_ ctx] (.fireChannelRegistered ctx))
+    (channelUnregistered [_ ctx] (.fireChannelUnregistered ctx))
+    (channelActive [_ ctx] (.fireChannelActive ctx))
+    (channelInactive [_ ctx] (.fireChannelInactive ctx))
+    (channelRead [_ ctx msg] (.fireChannelRead ctx msg))
+    (channelReadComplete [_ ctx] (.fireChannelReadComplete ctx))
+    (userEventTriggered [_ ctx evt] (.fireUserEventTriggered ctx evt))
+    (channelWritabilityChanged [_ ctx] (.fireChannelWritabilityChanged ctx))
+    (exceptionCaught [_ ctx cause] (.fireExceptionCaught ctx cause))))

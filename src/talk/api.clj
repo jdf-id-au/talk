@@ -70,16 +70,18 @@
         ; inbound only https://stackoverflow.com/a/38947978/780743
         #_(.addLast "http-agg" (HttpObjectAggregator. max-content-length))
         ; FIXME obviously DDOS risk so conditionally add to pipeline once auth'd?
-        (.addLast "http-disk-agg" (DiskHttpObjectAggregator. max-content-length))
+        #_(.addLast "http-disk-agg" (DiskHttpObjectAggregator. max-content-length))
         (.addLast "streamer" (ChunkedWriteHandler.))
         #_ (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions below
         (.addLast "ws" (WebSocketServerProtocolHandler.
                          ; TODO [application] could specify subprotocol?
                          ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
                          ws-path nil true max-frame-size handshake-timeout))
-        (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
+        #_(.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
         ; FIXME debug design/ref counting
         #_(.addLast "ws-disk-agg" (DiskWebSocketFrameAggregator. max-message-size))
+        ; These handlers are functions returning proxy or reify, i.e. new instance per channel:
+        ; (See `ChannelHandler` doc regarding state.)
         (.addLast "ws-handler" (ws/handler (assoc admin :type :ws)))
         (.addLast "http-handler" (http/handler (assoc admin :type :http)))))))
 
