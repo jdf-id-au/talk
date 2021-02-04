@@ -16,20 +16,22 @@
  */
 package io.netty.handler.codec;
 
-        import io.netty.buffer.ByteBuf;
-        import io.netty.buffer.ByteBufHolder;
-        import io.netty.buffer.CompositeByteBuf;
-        import io.netty.channel.ChannelFuture;
-        import io.netty.channel.ChannelFutureListener;
-        import io.netty.channel.ChannelHandler;
-        import io.netty.channel.ChannelHandlerContext;
-        import io.netty.channel.ChannelPipeline;
-        import io.netty.util.ReferenceCountUtil;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufHolder;
+import io.netty.buffer.CompositeByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelHandler;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelPipeline;
+import io.netty.handler.codec.http.multipart.HttpData;
+import io.netty.util.ReferenceCountUtil;
 
-        import java.util.List;
+import java.util.List;
 
-        import static io.netty.buffer.Unpooled.EMPTY_BUFFER;
-        import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
+import static io.netty.buffer.Unpooled.EMPTY_BUFFER;
+import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
 
 /**
  * An abstract {@link ChannelHandler} that aggregates a series of message objects into a single aggregated message.
@@ -179,7 +181,7 @@ public abstract class DiskMessageAggregator<I, S, C extends ByteBufHolder, O ext
         if (maxCumulationBufferComponents < 2) {
             throw new IllegalArgumentException(
                     "maxCumulationBufferComponents: " + maxCumulationBufferComponents +
-                            " (expected: >= 2)");
+                    " (expected: >= 2)");
         }
 
         if (ctx == null) {
@@ -269,11 +271,16 @@ public abstract class DiskMessageAggregator<I, S, C extends ByteBufHolder, O ext
             }
 
             // A streamed message - initialize the cumulative buffer, and wait for incoming chunks.
-            CompositeByteBuf content = ctx.alloc().compositeBuffer(maxCumulationBufferComponents);
+//            CompositeByteBuf content = ctx.alloc().compositeBuffer(maxCumulationBufferComponents);
+//            if (m instanceof ByteBufHolder) {
+//                appendPartialContent(content, ((ByteBufHolder) m).content());
+//            }
+//            currentMessage = beginAggregation(m, content);
             if (m instanceof ByteBufHolder) {
-                appendPartialContent(content, ((ByteBufHolder) m).content());
+                currentMessage = beginAggregation(m, ((ByteBufHolder) m).content());
+            } else {
+                currentMessage = beginAggregation(m, Unpooled.EMPTY_BUFFER);
             }
-            currentMessage = beginAggregation(m, content);
         } else if (isContentMessage(msg)) {
             if (currentMessage == null) {
                 // it is possible that a TooLongFrameException was already thrown but we can still discard data
@@ -282,11 +289,12 @@ public abstract class DiskMessageAggregator<I, S, C extends ByteBufHolder, O ext
             }
 
             // Merge the received chunk into the content of the current message.
-            CompositeByteBuf content = (CompositeByteBuf) currentMessage.content();
+            ByteBuf content = currentMessage.content();
 
             @SuppressWarnings("unchecked")
             final C m = (C) msg;
             // Handle oversized message.
+            // Don't quite understand when writerIndex changes
             if (content.readableBytes() > maxContentLength - m.content().readableBytes()) {
                 // By convention, full message type extends first message type.
                 @SuppressWarnings("unchecked")
@@ -296,7 +304,12 @@ public abstract class DiskMessageAggregator<I, S, C extends ByteBufHolder, O ext
             }
 
             // Append the content of the chunk.
-            appendPartialContent(content, m.content());
+//            appendPartialContent(content, m.content());
+            if (m.content().isReadable()) {
+                // FIXME clumsy, but failed to make AFHM implement HttpData because method clash
+                MixedData d = (MixedData) currentMessage;
+                d.addContent(m.content().retain(), isLastContentMessage(m));
+            }
 
             // Give the subtypes a chance to merge additional information such as trailing headers.
             aggregate(currentMessage, m);
@@ -329,11 +342,11 @@ public abstract class DiskMessageAggregator<I, S, C extends ByteBufHolder, O ext
         }
     }
 
-    private static void appendPartialContent(CompositeByteBuf content, ByteBuf partialContent) {
-        if (partialContent.isReadable()) {
-            content.addComponent(true, partialContent.retain());
-        }
-    }
+//    private static void appendPartialContent(CompositeByteBuf content, ByteBuf partialContent) {
+//        if (partialContent.isReadable()) {
+//            content.addComponent(true, partialContent.retain());
+//        }
+//    }
 
     /**
      * Determine if the message {@code start}'s content length is known, and if it greater than

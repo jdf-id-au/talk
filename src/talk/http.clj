@@ -87,7 +87,6 @@
     ; May need to review when enabling HttpContentEncoder etc. What about HTTP/2?
     (HttpUtil/setContentLength res (-> res .content .readableBytes))
     (let [cf (.writeAndFlush ctx res)]
-      ; Strictly should wait for this before alt! takes next from out-sub?
       (when-not keep-alive? (.addListener cf ChannelFutureListener/CLOSE)))))
 
 (defn stream!

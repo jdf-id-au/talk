@@ -20,15 +20,21 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPipeline;
 import io.netty.handler.codec.DecoderResult;
+import io.netty.handler.codec.MixedData;
 import io.netty.handler.codec.DiskMessageAggregator;
 import io.netty.handler.codec.TooLongFrameException;
+import io.netty.handler.codec.http.multipart.DefaultHttpDataFactory;
+import io.netty.handler.codec.http.multipart.HttpData;
+import io.netty.handler.codec.http.multipart.MixedAttribute;
+import io.netty.util.Attribute;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
-import java.util.List;
+import java.io.IOException;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.CONNECTION;
 import static io.netty.handler.codec.http.HttpHeaderNames.CONTENT_LENGTH;
@@ -48,7 +54,7 @@ public class DiskHttpObjectAggregator
     private static final FullHttpResponse TOO_LARGE_CLOSE = new DefaultFullHttpResponse(
             HttpVersion.HTTP_1_1, HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE, Unpooled.EMPTY_BUFFER);
     private static final FullHttpResponse TOO_LARGE = new DefaultFullHttpResponse(
-            HttpVersion.HTTP_1_1, HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE, Unpooled.EMPTY_BUFFER);
+        HttpVersion.HTTP_1_1, HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE, Unpooled.EMPTY_BUFFER);
 
     static {
         EXPECTATION_FAILED.headers().set(CONTENT_LENGTH, 0);
@@ -104,10 +110,6 @@ public class DiskHttpObjectAggregator
         return msg instanceof FullHttpMessage;
     }
 
-    protected void decode(final ChannelHandlerContext ctx, HttpMessage msg, List<Object> out) throws Exception {
-
-    }
-
     @Override
     protected boolean isContentLengthInvalid(HttpMessage start, int maxContentLength) {
         try {
@@ -160,7 +162,7 @@ public class DiskHttpObjectAggregator
     }
 
     @Override
-    protected FullHttpMessage beginAggregation(HttpMessage start, ByteBuf content) throws Exception {
+    protected AggregatedFullHttpMessage beginAggregation(HttpMessage start, ByteBuf content) throws Exception {
         assert !(start instanceof FullHttpMessage);
 
         HttpUtil.setTransferEncodingChunked(start, false);
@@ -207,7 +209,7 @@ public class DiskHttpObjectAggregator
             // If the client started to send data already, close because it's impossible to recover.
             // If keep-alive is off and 'Expect: 100-continue' is missing, no need to leave the connection open.
             if (oversized instanceof FullHttpMessage ||
-                    !HttpUtil.is100ContinueExpected(oversized) && !HttpUtil.isKeepAlive(oversized)) {
+                !HttpUtil.is100ContinueExpected(oversized) && !HttpUtil.isKeepAlive(oversized)) {
                 ChannelFuture future = ctx.writeAndFlush(TOO_LARGE_CLOSE.retainedDuplicate());
                 future.addListener(new ChannelFutureListener() {
                     @Override
@@ -237,33 +239,25 @@ public class DiskHttpObjectAggregator
         }
     }
 
-    private abstract static class AggregatedFullHttpMessage implements FullHttpMessage {
+    private abstract static class AggregatedFullHttpMessage implements FullHttpMessage, MixedData {
         protected final HttpMessage message;
-        private final ByteBuf content;
+        private final MixedAttribute storage;
         private HttpHeaders trailingHeaders;
 
         AggregatedFullHttpMessage(HttpMessage message, ByteBuf content, HttpHeaders trailingHeaders) {
-//            ByteBuf tempContent;
-//            try {
-//                File tempFile = File.createTempFile("httprequest", null);
-//                logger.debug("created httprequest tempFile", tempFile);
-//                logger.debug(content.getClass().toString());
-//                RandomAccessFile raf = new RandomAccessFile(tempFile, "rw");
-//                // nb not actually worth it for < "few tens of kb"
-//                // also misses the point because file has to fit in memory!
-//                MappedByteBuffer mbb = raf.getChannel().map(FileChannel.MapMode.READ_WRITE, 0, content.readableBytes());
-//                tempContent = Unpooled.wrappedBuffer(mbb);
-//
-//            } catch (IOException e) {
-//                logger.error("Failed to create httprequest tempFile", e);
-//                tempContent = content;
-//            }
             this.message = message;
-            /* TODO swap out this ByteBuf for a disk-backed one,
-                 ideally only when exceeds certain size e.g. 16KB */
-            this.content = content;
-//            this.content = tempContent;
+            this.storage = new MixedAttribute("aggregator", DefaultHttpDataFactory.MINSIZE);
+            try {
+                storage.setContent(content);
+            } catch (IOException e) {
+                logger.error("Unable to create aggregator", e);
+            }
             this.trailingHeaders = trailingHeaders;
+        }
+
+        // after HttpData, without actually implementing interface...
+        public void addContent(ByteBuf buffer, boolean last) throws IOException {
+            this.storage.addContent(buffer, last);
         }
 
         @Override
@@ -318,46 +312,46 @@ public class DiskHttpObjectAggregator
 
         @Override
         public ByteBuf content() {
-            return content;
+            return this.storage.content();
         }
 
         @Override
         public int refCnt() {
-            return content.refCnt();
+            return this.storage.content().refCnt();
         }
 
         @Override
         public FullHttpMessage retain() {
-            content.retain();
+            this.storage.content().retain();
             return this;
         }
 
         @Override
         public FullHttpMessage retain(int increment) {
-            content.retain(increment);
+            this.storage.content().retain(increment);
             return this;
         }
 
         @Override
         public FullHttpMessage touch(Object hint) {
-            content.touch(hint);
+            this.storage.content().touch(hint);
             return this;
         }
 
         @Override
         public FullHttpMessage touch() {
-            content.touch();
+            this.storage.content().touch();
             return this;
         }
 
         @Override
         public boolean release() {
-            return content.release();
+            return this.storage.content().release();
         }
 
         @Override
         public boolean release(int decrement) {
-            return content.release(decrement);
+            return this.storage.content().release(decrement);
         }
 
         @Override
