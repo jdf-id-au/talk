@@ -132,7 +132,7 @@
     (fn [^DiskHttpObjectAggregator$AggregatedFullHttpRequest req]
       (condp contains? (.method req)
         #{HttpMethod/POST}
-        (let [decoder (HttpPostRequestDecoder. data-factory req)]
+        (let [decoder (HttpPostRequestDecoder. data-factory req)] ; FIXME adapt to use MixedData
           {:cleanup #(.destroy decoder)
            :data
            (some->>
@@ -161,13 +161,16 @@
                    (assoc base :type (.getHttpDataType d)))))
              seq (into []))})
         #{HttpMethod/PUT HttpMethod/PATCH}
-        (let [mime-type (or (HttpUtil/getMimeType req) "application/octet-stream")
-              charset (HttpUtil/getCharset req)
-              content-length (HttpUtil/getContentLength req)
-              base {:charset (-> charset .toString keyword)}]
-          ; Arrgh file is exactly 9KB no matter how long input! (once above threshold for to-disk)
+        (let [charset (HttpUtil/getCharset req)
+              base {:charset (-> charset .toString keyword)}
+              #_#_u (doto (.createAttribute data-factory req "put or post")
+                      (.setContent (-> req .retain .content)))]
           {:cleanup #(.cleanRequestHttpData data-factory req)
-           :data (vector (if (.isInMemory req)
+           :data #_(vector (if (.isInMemory u)
+                             (assoc base :value (.get u))
+                             (assoc base :file (.getFile u))))
+           ; from struggles with DiskHttpObjectAggregator:
+                 (vector (if (.isInMemory req)
                            (assoc base :value (.get ^MixedData (.retain req)))
                            (assoc base :file (.getFile ^MixedData (.retain req)))))})
         ; else

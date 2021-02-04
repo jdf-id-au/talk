@@ -29,7 +29,6 @@ import io.netty.handler.codec.DiskMessageAggregator;
 import io.netty.handler.codec.TooLongFrameException;
 import io.netty.handler.codec.http.multipart.DefaultHttpDataFactory;
 import io.netty.handler.codec.http.multipart.MixedAttribute;
-import io.netty.util.Attribute;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
@@ -248,8 +247,8 @@ public class DiskHttpObjectAggregator
             this.message = message;
             this.storage = new MixedAttribute("aggregator", DefaultHttpDataFactory.MINSIZE);
             try {
-                //storage.setContent(content); // (potentially) misleadingly does setCompleted()
-                storage.addContent(content, false);
+                storage.setContent(content); // (potentially) misleadingly does setCompleted()
+//                storage.addContent(content, false);
             } catch (IOException e) {
                 logger.error("Unable to create aggregator", e);
             }
@@ -258,16 +257,6 @@ public class DiskHttpObjectAggregator
 
         public void addContent(ByteBuf buffer, boolean last) throws IOException {
             this.storage.addContent(buffer, last); // misleadingly setCompleted() in AMHD
-            logger.info(
-                " buffer " + buffer.readableBytes() +
-                " last " + last +
-                " defined length " + this.storage.definedLength() +
-                " storage length " + this.storage.length() + // seemingly 8KB chunks
-                " isInMemory " + this.storage.isInMemory() +
-                " isCompleted " + this.storage.isCompleted() + // misleadingly? true when initially in memory
-                " getFile " + (this.storage.isInMemory() ? "n/a" : this.storage.getFile()) +
-                " file length " + (this.storage.isInMemory() ? "n/a" :this.storage.getFile().length() )
-            );
         }
 
         public byte[] get() throws IOException {
