@@ -16,6 +16,7 @@
  ; Project Structure > Project Settings > Modules > talk > Paths >
  ; Compiler Output: Use module compile output path >
  ; Output path: .../talk/classes
+ ; watch because it might flick back...?
  :paths ["src" "classes"]
  :aliases
  {:dev {:extra-deps {org.clojure/clojure {:mvn/version "1.10.2"}

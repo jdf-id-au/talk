@@ -45,7 +45,7 @@ import static io.netty.handler.codec.http.HttpUtil.getContentLength;
  */
 public class DiskHttpObjectAggregator
         extends DiskMessageAggregator<HttpObject, HttpMessage, HttpContent, FullHttpMessage> {
-    private static final InternalLogger logger = InternalLoggerFactory.getInstance(HttpObjectAggregator.class);
+    private static final InternalLogger logger = InternalLoggerFactory.getInstance(DiskHttpObjectAggregator.class);
     private static final FullHttpResponse CONTINUE =
             new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.CONTINUE, Unpooled.EMPTY_BUFFER);
     private static final FullHttpResponse EXPECTATION_FAILED = new DefaultFullHttpResponse(
@@ -245,7 +245,7 @@ public class DiskHttpObjectAggregator
 
         AggregatedFullHttpMessage(HttpMessage message, ByteBuf content, HttpHeaders trailingHeaders) {
             this.message = message;
-            this.storage = new MixedAttribute("aggregator", DefaultHttpDataFactory.MINSIZE);
+            this.storage = new MixedAttribute("http-agg", DefaultHttpDataFactory.MINSIZE);
             try {
                 storage.setContent(content); // (potentially) misleadingly does setCompleted()
 //                storage.addContent(content, false);

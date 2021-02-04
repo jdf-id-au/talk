@@ -16,10 +16,18 @@
 package io.netty.handler.codec.http.websocketx;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufHolder;
 import io.netty.channel.ChannelPipeline;
 import io.netty.handler.codec.DiskMessageAggregator;
-import io.netty.handler.codec.MessageAggregator;
+import io.netty.handler.codec.MixedData;
 import io.netty.handler.codec.TooLongFrameException;
+import io.netty.handler.codec.http.multipart.DefaultHttpDataFactory;
+import io.netty.handler.codec.http.multipart.MixedAttribute;
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
+
+import java.io.File;
+import java.io.IOException;
 
 /**
  * Handler that aggregate fragmented WebSocketFrame's.
@@ -29,7 +37,7 @@ import io.netty.handler.codec.TooLongFrameException;
  */
 public class DiskWebSocketFrameAggregator
         extends DiskMessageAggregator<WebSocketFrame, WebSocketFrame, ContinuationWebSocketFrame, WebSocketFrame> {
-
+    private static final InternalLogger logger = InternalLoggerFactory.getInstance(DiskWebSocketFrameAggregator.class);
     /**
      * Creates a new instance
      *
@@ -85,16 +93,168 @@ public class DiskWebSocketFrameAggregator
     }
 
     @Override
-    protected WebSocketFrame beginAggregation(WebSocketFrame start, ByteBuf content) throws Exception {
+    protected AggregatedWebSocketFrame beginAggregation(WebSocketFrame start, ByteBuf content) throws Exception {
+        assert !(start instanceof AggregatedWebSocketFrame);
         if (start instanceof TextWebSocketFrame) {
-            return new TextWebSocketFrame(true, start.rsv(), content);
+            return new AggregatedTextWebSocketFrame(true, start.rsv(), content);
+        } else if (start instanceof BinaryWebSocketFrame) {
+            return new AggregatedBinaryWebSocketFrame(true, start.rsv(), content);
+        } else {
+            throw new Error();
         }
-
-        if (start instanceof BinaryWebSocketFrame) {
-            return new BinaryWebSocketFrame(true, start.rsv(), content);
-        }
-
-        // Should not reach here.
-        throw new Error();
     }
+
+    private abstract static class AggregatedWebSocketFrame extends WebSocketFrame implements MixedData, ByteBufHolder {
+        private final MixedAttribute storage;
+
+        AggregatedWebSocketFrame(boolean finalFragment, int rsv, ByteBuf content) {
+            super(finalFragment, rsv, content);
+            this.storage = new MixedAttribute("ws-agg", DefaultHttpDataFactory.MINSIZE);
+            try {
+                storage.setContent(content);
+            } catch (IOException e) {
+                logger.error("Unable to create aggregator", e);
+            }
+        }
+
+        public void addContent(ByteBuf buffer, boolean last) throws IOException {
+            // arrgh
+            logger.debug(" this " + this.refCnt() +
+                    " buffer " + buffer.refCnt() +
+                    " storage " + storage.refCnt());
+            this.storage.addContent(buffer, last);
+        }
+
+        public byte[] get() throws IOException {
+            return this.storage.get();
+        }
+
+        public boolean isInMemory() {
+            return this.storage.isInMemory();
+        }
+
+        public File getFile() throws IOException {
+            return this.storage.getFile();
+        }
+
+        @Override
+        public ByteBuf content() {
+            return this.storage.content();
+        }
+
+        @Override
+        public int refCnt() {
+            return this.storage.refCnt();
+        }
+        
+        @Override
+        public boolean release() {
+            return this.storage.release();
+        }
+
+        @Override
+        public boolean release(int decrement) {
+            return this.storage.release(decrement);
+        }
+        
+        @Override
+        public abstract WebSocketFrame copy();
+        
+        @Override
+        public abstract WebSocketFrame duplicate();
+        
+        @Override
+        public abstract WebSocketFrame retainedDuplicate();
+    }
+    
+    private static final class AggregatedTextWebSocketFrame extends AggregatedWebSocketFrame {
+        
+        AggregatedTextWebSocketFrame(boolean finalFragment, int rsv, ByteBuf content) {
+            super(finalFragment, rsv, content);
+        }
+        
+        @Override
+        public TextWebSocketFrame copy() {
+            return replace(content().copy());
+        }
+        
+        @Override
+        public TextWebSocketFrame duplicate() {
+            return replace(content().duplicate());
+        }
+        
+        @Override
+        public TextWebSocketFrame retainedDuplicate() {
+            return replace(content().retainedDuplicate());
+        }
+        
+        @Override
+        public TextWebSocketFrame replace(ByteBuf content) {
+            return new TextWebSocketFrame(this.isFinalFragment(), this.rsv(), content);
+        }
+        
+        @Override
+        public AggregatedTextWebSocketFrame retain(int increment) {
+            super.retain(increment);
+            return this;
+        }
+        
+        @Override
+        public AggregatedTextWebSocketFrame retain() {
+            super.retain();
+            return this;
+        }
+        
+        @Override
+        public AggregatedTextWebSocketFrame touch() {
+            super.touch();
+            return this;
+        }
+    }
+
+    private static final class AggregatedBinaryWebSocketFrame extends AggregatedWebSocketFrame {
+
+        AggregatedBinaryWebSocketFrame(boolean finalFragment, int rsv, ByteBuf content) {
+            super(finalFragment, rsv, content);
+        }
+
+        @Override
+        public BinaryWebSocketFrame copy() {
+            return replace(content().copy());
+        }
+
+        @Override
+        public BinaryWebSocketFrame duplicate() {
+            return replace(content().duplicate());
+        }
+
+        @Override
+        public BinaryWebSocketFrame retainedDuplicate() {
+            return replace(content().retainedDuplicate());
+        }
+
+        @Override
+        public BinaryWebSocketFrame replace(ByteBuf content) {
+            return new BinaryWebSocketFrame(this.isFinalFragment(), this.rsv(), content);
+        }
+
+        @Override
+        public AggregatedBinaryWebSocketFrame retain(int increment) {
+            super.retain(increment);
+            return this;
+        }
+
+        @Override
+        public AggregatedBinaryWebSocketFrame retain() {
+            super.retain();
+            return this;
+        }
+
+        @Override
+        public AggregatedBinaryWebSocketFrame touch() {
+            super.touch();
+            return this;
+        }
+    }
+
 }

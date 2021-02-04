@@ -19,7 +19,8 @@
                                         HttpContentEncoder HttpContentDecoder
                                         HttpObjectAggregator HttpVersion DiskHttpObjectAggregator)
            (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler
-                                                   WebSocketFrameAggregator)
+                                                   WebSocketFrameAggregator
+                                                   DiskWebSocketFrameAggregator)
            (io.netty.handler.codec.http.websocketx.extensions.compression
              WebSocketServerCompressionHandler)
            (io.netty.handler.stream ChunkedWriteHandler)
@@ -67,9 +68,9 @@
         #_(.addLast "http-compr" (HttpContentCompressor.))
         #_(.addLast "http-decompr" (HttpContentDecompressor.))
         ; inbound only https://stackoverflow.com/a/38947978/780743
-        ; might need to be at channelRead0 level rather than pipeline
         #_(.addLast "http-agg" (HttpObjectAggregator. max-content-length))
-        (.addLast "http-agg" (DiskHttpObjectAggregator. max-content-length))
+        ; FIXME obviously DDOS risk so conditionally add to pipeline once auth'd?
+        (.addLast "http-disk-agg" (DiskHttpObjectAggregator. max-content-length))
         (.addLast "streamer" (ChunkedWriteHandler.))
         #_ (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions below
         (.addLast "ws" (WebSocketServerProtocolHandler.
@@ -77,6 +78,8 @@
                          ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
                          ws-path nil true max-frame-size handshake-timeout))
         (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
+        ; FIXME debug design/ref counting
+        #_(.addLast "ws-disk-agg" (DiskWebSocketFrameAggregator. max-message-size))
         (.addLast "ws-handler" (ws/handler (assoc admin :type :ws)))
         (.addLast "http-handler" (http/handler (assoc admin :type :http)))))))
 

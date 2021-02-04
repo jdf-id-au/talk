@@ -6,7 +6,7 @@
             [clojure.pprint :as pprint]))
 
 #_ ((:close s))
-#_ (def s (talk/server! 8125 {:max-content-length (* 5 1024 1024 1024)}))
+#_ (def s (talk/server! 8125 {:max-content-length (* 1 1024 1024) #_(* 5 1024 1024 1024)}))
 #_ (def inspect
      (go-loop [{:keys [ch connected text method data] :as msg} (<! (s :in))]
        (tap> ["received" msg])
@@ -38,8 +38,6 @@
          (recur (<! (s :in))))))
 
 ; Status:
-; http requests with body < threshold (therefore going to memory) seem fine
-; larger ones (therefore going to file) seem to come in but not get stored properly (or deleted too soon?)
 ; *** need to get upload-handler to look at Attr... file rather than a buffer?? (or up the chain)
 
 (add-tap pprint/pprint)
@@ -54,8 +52,9 @@
 
 ; Can test file upload POST and PUT with (respectively):
 ; Will only be :file if over threshold (default 16KB)
-; % curl -o POST.pdf --form "fileupload=@file.pdf;filename=hmm.pdf" http://localhost:8125
-; $ curl -o PUT.pdf -v -T file.pdf http://localhost:8125
+; FIXME does seem fairly slow for huge files (what determines chunk size?)
+; % curl http://localhost:8125 -v --form "fileupload=@file.pdf;filename=hmm.pdf"
+; $ curl http://localhost:8125 -v -T file.pdf
 ; TODO:
 ; Routing entirely within application (bidi I guess)
 ; HTTP basics - some in application; could plagiarise bits of Ring

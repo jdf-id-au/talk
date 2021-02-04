@@ -132,6 +132,7 @@
     (fn [^DiskHttpObjectAggregator$AggregatedFullHttpRequest req]
       (condp contains? (.method req)
         #{HttpMethod/POST}
+        ; FIXME might be much easier just to support PUT and PATCH for huge files?
         (let [decoder (HttpPostRequestDecoder. data-factory req)] ; FIXME adapt to use MixedData
           {:cleanup #(.destroy decoder)
            :data

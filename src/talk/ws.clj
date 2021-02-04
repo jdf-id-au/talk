@@ -58,6 +58,7 @@
       (let [ch (.channel ctx)
             id (.id ch)
             in-err #(log/error "Dropped incoming websocket message because in chan is closed" %)]
+        (log/info "got here")
         (condp instance? frame
           TextWebSocketFrame
           (let [text (.text ^TextWebSocketFrame frame)]
