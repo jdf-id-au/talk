@@ -28,7 +28,6 @@ import io.netty.handler.codec.MixedData;
 import io.netty.handler.codec.DiskMessageAggregator;
 import io.netty.handler.codec.TooLongFrameException;
 import io.netty.handler.codec.http.multipart.DefaultHttpDataFactory;
-import io.netty.handler.codec.http.multipart.HttpData;
 import io.netty.handler.codec.http.multipart.MixedAttribute;
 import io.netty.util.Attribute;
 import io.netty.util.internal.logging.InternalLogger;
@@ -72,7 +71,7 @@ public class DiskHttpObjectAggregator
      * If the length of the aggregated content exceeds this value,
      * {@link #handleOversizedMessage(ChannelHandlerContext, HttpMessage)} will be called.
      */
-    public DiskHttpObjectAggregator(int maxContentLength) {
+    public DiskHttpObjectAggregator(long maxContentLength) {
         this(maxContentLength, false);
     }
 
@@ -85,7 +84,7 @@ public class DiskHttpObjectAggregator
      * then {@code true} means close the connection. otherwise the connection will remain open and data will be
      * consumed and discarded until the next request is received.
      */
-    public DiskHttpObjectAggregator(int maxContentLength, boolean closeOnExpectationFailed) {
+    public DiskHttpObjectAggregator(long maxContentLength, boolean closeOnExpectationFailed) {
         super(maxContentLength);
         this.closeOnExpectationFailed = closeOnExpectationFailed;
     }
@@ -111,7 +110,7 @@ public class DiskHttpObjectAggregator
     }
 
     @Override
-    protected boolean isContentLengthInvalid(HttpMessage start, int maxContentLength) {
+    protected boolean isContentLengthInvalid(HttpMessage start, long maxContentLength) {
         try {
             return getContentLength(start, -1L) > maxContentLength;
         } catch (final NumberFormatException e) {
@@ -119,7 +118,7 @@ public class DiskHttpObjectAggregator
         }
     }
 
-    private static Object continueResponse(HttpMessage start, int maxContentLength, ChannelPipeline pipeline) {
+    private static Object continueResponse(HttpMessage start, long maxContentLength, ChannelPipeline pipeline) {
         if (HttpUtil.isUnsupportedExpectation(start)) {
             // if the request contains an unsupported expectation, we return 417
             pipeline.fireUserEventTriggered(HttpExpectationFailedEvent.INSTANCE);
@@ -137,7 +136,7 @@ public class DiskHttpObjectAggregator
     }
 
     @Override
-    protected Object newContinueResponse(HttpMessage start, int maxContentLength, ChannelPipeline pipeline) {
+    protected Object newContinueResponse(HttpMessage start, long maxContentLength, ChannelPipeline pipeline) {
         Object response = continueResponse(start, maxContentLength, pipeline);
         // we're going to respond based on the request expectation so there's no
         // need to propagate the expectation further.
@@ -255,7 +254,6 @@ public class DiskHttpObjectAggregator
             this.trailingHeaders = trailingHeaders;
         }
 
-        // after HttpData, without actually implementing interface...
         public void addContent(ByteBuf buffer, boolean last) throws IOException {
             this.storage.addContent(buffer, last);
         }

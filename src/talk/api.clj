@@ -48,10 +48,10 @@
 
 (defn pipeline
   [^String ws-path
-   {:keys [^int max-content-length ; max HTTP upload
+   {:keys [^long max-content-length ; max HTTP upload
            ^int handshake-timeout
            ^int max-frame-size
-           ^int max-message-size] ; max WS message
+           ^long max-message-size] ; max WS message
     :or {max-content-length (* 1024 1024)
          handshake-timeout (* 5 1000)
          max-frame-size (* 64 1024)

@@ -5,7 +5,7 @@
             [clojure.tools.logging :as log]))
 
 #_ ((:close s))
-#_ (def s (talk/server! 8125))
+#_ (def s (talk/server! 8125 {:max-content-length (* 5 1024 1024 1024)}))
 #_ (def echo
      (go-loop [{:keys [ch type connected text method data] :as msg} (<! (s :in))]
        (log/info "successfully <! from server in" msg)

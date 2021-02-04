@@ -25,7 +25,6 @@ import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPipeline;
-import io.netty.handler.codec.http.multipart.HttpData;
 import io.netty.util.ReferenceCountUtil;
 
 import java.util.List;
@@ -55,13 +54,13 @@ import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
 public abstract class DiskMessageAggregator<I, S, C extends ByteBufHolder, O extends ByteBufHolder>
         extends MessageToMessageDecoder<I> {
 
-    private static final int DEFAULT_MAX_COMPOSITEBUFFER_COMPONENTS = 1024;
+//    private static final int DEFAULT_MAX_COMPOSITEBUFFER_COMPONENTS = 1024;
 
-    private final int maxContentLength;
+    private final long maxContentLength;
     private O currentMessage;
     private boolean handlingOversizedMessage;
 
-    private int maxCumulationBufferComponents = DEFAULT_MAX_COMPOSITEBUFFER_COMPONENTS;
+//    private int maxCumulationBufferComponents = DEFAULT_MAX_COMPOSITEBUFFER_COMPONENTS;
     private ChannelHandlerContext ctx;
     private ChannelFutureListener continueResponseWriteListener;
 
@@ -75,18 +74,18 @@ public abstract class DiskMessageAggregator<I, S, C extends ByteBufHolder, O ext
      *        If the length of the aggregated content exceeds this value,
      *        {@link #handleOversizedMessage(ChannelHandlerContext, Object)} will be called.
      */
-    protected DiskMessageAggregator(int maxContentLength) {
+    protected DiskMessageAggregator(long maxContentLength) {
         validateMaxContentLength(maxContentLength);
         this.maxContentLength = maxContentLength;
     }
 
-    protected DiskMessageAggregator(int maxContentLength, Class<? extends I> inboundMessageType) {
+    protected DiskMessageAggregator(long maxContentLength, Class<? extends I> inboundMessageType) {
         super(inboundMessageType);
         validateMaxContentLength(maxContentLength);
         this.maxContentLength = maxContentLength;
     }
 
-    private static void validateMaxContentLength(int maxContentLength) {
+    private static void validateMaxContentLength(long maxContentLength) {
         checkPositiveOrZero(maxContentLength, "maxContentLength");
     }
 
@@ -156,41 +155,41 @@ public abstract class DiskMessageAggregator<I, S, C extends ByteBufHolder, O ext
     /**
      * Returns the maximum allowed length of the aggregated message in bytes.
      */
-    public final int maxContentLength() {
+    public final long maxContentLength() {
         return maxContentLength;
     }
 
-    /**
-     * Returns the maximum number of components in the cumulation buffer.  If the number of
-     * the components in the cumulation buffer exceeds this value, the components of the
-     * cumulation buffer are consolidated into a single component, involving memory copies.
-     * The default value of this property is {@value #DEFAULT_MAX_COMPOSITEBUFFER_COMPONENTS}.
-     */
-    public final int maxCumulationBufferComponents() {
-        return maxCumulationBufferComponents;
-    }
-
-    /**
-     * Sets the maximum number of components in the cumulation buffer.  If the number of
-     * the components in the cumulation buffer exceeds this value, the components of the
-     * cumulation buffer are consolidated into a single component, involving memory copies.
-     * The default value of this property is {@value #DEFAULT_MAX_COMPOSITEBUFFER_COMPONENTS}
-     * and its minimum allowed value is {@code 2}.
-     */
-    public final void setMaxCumulationBufferComponents(int maxCumulationBufferComponents) {
-        if (maxCumulationBufferComponents < 2) {
-            throw new IllegalArgumentException(
-                    "maxCumulationBufferComponents: " + maxCumulationBufferComponents +
-                    " (expected: >= 2)");
-        }
-
-        if (ctx == null) {
-            this.maxCumulationBufferComponents = maxCumulationBufferComponents;
-        } else {
-            throw new IllegalStateException(
-                    "decoder properties cannot be changed once the decoder is added to a pipeline.");
-        }
-    }
+//    /**
+//     * Returns the maximum number of components in the cumulation buffer.  If the number of
+//     * the components in the cumulation buffer exceeds this value, the components of the
+//     * cumulation buffer are consolidated into a single component, involving memory copies.
+//     * The default value of this property is {@value #DEFAULT_MAX_COMPOSITEBUFFER_COMPONENTS}.
+//     */
+//    public final int maxCumulationBufferComponents() {
+//        return maxCumulationBufferComponents;
+//    }
+//
+//    /**
+//     * Sets the maximum number of components in the cumulation buffer.  If the number of
+//     * the components in the cumulation buffer exceeds this value, the components of the
+//     * cumulation buffer are consolidated into a single component, involving memory copies.
+//     * The default value of this property is {@value #DEFAULT_MAX_COMPOSITEBUFFER_COMPONENTS}
+//     * and its minimum allowed value is {@code 2}.
+//     */
+//    public final void setMaxCumulationBufferComponents(int maxCumulationBufferComponents) {
+//        if (maxCumulationBufferComponents < 2) {
+//            throw new IllegalArgumentException(
+//                    "maxCumulationBufferComponents: " + maxCumulationBufferComponents +
+//                    " (expected: >= 2)");
+//        }
+//
+//        if (ctx == null) {
+//            this.maxCumulationBufferComponents = maxCumulationBufferComponents;
+//        } else {
+//            throw new IllegalStateException(
+//                    "decoder properties cannot be changed once the decoder is added to a pipeline.");
+//        }
+//    }
 
     /**
      * @deprecated This method will be removed in future releases.
@@ -271,11 +270,6 @@ public abstract class DiskMessageAggregator<I, S, C extends ByteBufHolder, O ext
             }
 
             // A streamed message - initialize the cumulative buffer, and wait for incoming chunks.
-//            CompositeByteBuf content = ctx.alloc().compositeBuffer(maxCumulationBufferComponents);
-//            if (m instanceof ByteBufHolder) {
-//                appendPartialContent(content, ((ByteBufHolder) m).content());
-//            }
-//            currentMessage = beginAggregation(m, content);
             if (m instanceof ByteBufHolder) {
                 currentMessage = beginAggregation(m, ((ByteBufHolder) m).content());
             } else {
@@ -304,9 +298,7 @@ public abstract class DiskMessageAggregator<I, S, C extends ByteBufHolder, O ext
             }
 
             // Append the content of the chunk.
-//            appendPartialContent(content, m.content());
             if (m.content().isReadable()) {
-                // FIXME clumsy, but failed to make AFHM implement HttpData because method clash
                 MixedData d = (MixedData) currentMessage;
                 d.addContent(m.content().retain(), isLastContentMessage(m));
             }
@@ -342,12 +334,6 @@ public abstract class DiskMessageAggregator<I, S, C extends ByteBufHolder, O ext
         }
     }
 
-//    private static void appendPartialContent(CompositeByteBuf content, ByteBuf partialContent) {
-//        if (partialContent.isReadable()) {
-//            content.addComponent(true, partialContent.retain());
-//        }
-//    }
-
     /**
      * Determine if the message {@code start}'s content length is known, and if it greater than
      * {@code maxContentLength}.
@@ -356,7 +342,7 @@ public abstract class DiskMessageAggregator<I, S, C extends ByteBufHolder, O ext
      * @return {@code true} if the message {@code start}'s content length is known, and if it greater than
      * {@code maxContentLength}. {@code false} otherwise.
      */
-    protected abstract boolean isContentLengthInvalid(S start, int maxContentLength) throws Exception;
+    protected abstract boolean isContentLengthInvalid(S start, long maxContentLength) throws Exception;
 
     /**
      * Returns the 'continue response' for the specified start message if necessary. For example, this method is
@@ -364,15 +350,15 @@ public abstract class DiskMessageAggregator<I, S, C extends ByteBufHolder, O ext
      *
      * @return the 'continue response', or {@code null} if there's no message to send
      */
-    protected abstract Object newContinueResponse(S start, int maxContentLength, ChannelPipeline pipeline)
+    protected abstract Object newContinueResponse(S start, long maxContentLength, ChannelPipeline pipeline)
             throws Exception;
 
     /**
      * Determine if the channel should be closed after the result of
-     * {@link #newContinueResponse(Object, int, ChannelPipeline)} is written.
-     * @param msg The return value from {@link #newContinueResponse(Object, int, ChannelPipeline)}.
+     * {@link #newContinueResponse(Object, long, ChannelPipeline)} is written.
+     * @param msg The return value from {@link #newContinueResponse(Object, long, ChannelPipeline)}.
      * @return {@code true} if the channel should be closed after the result of
-     * {@link #newContinueResponse(Object, int, ChannelPipeline)} is written. {@code false} otherwise.
+     * {@link #newContinueResponse(Object, long, ChannelPipeline)} is written. {@code false} otherwise.
      */
     protected abstract boolean closeAfterContinueResponse(Object msg) throws Exception;
 
@@ -380,7 +366,7 @@ public abstract class DiskMessageAggregator<I, S, C extends ByteBufHolder, O ext
      * Determine if all objects for the current request/response should be ignored or not.
      * Messages will stop being ignored the next time {@link #isContentMessage(Object)} returns {@code true}.
      *
-     * @param msg The return value from {@link #newContinueResponse(Object, int, ChannelPipeline)}.
+     * @param msg The return value from {@link #newContinueResponse(Object, long, ChannelPipeline)}.
      * @return {@code true} if all objects for the current request/response should be ignored or not.
      * {@code false} otherwise.
      */
