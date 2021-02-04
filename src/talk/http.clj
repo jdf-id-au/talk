@@ -4,7 +4,8 @@
             [clojure.core.async :as async :refer [go go-loop chan <!! >!! <! >!
                                                   put! close! alt! alt!!]]
             [clojure.string :as str]
-            [clojure.spec.alpha :as s])
+            [clojure.spec.alpha :as s]
+            [clojure.spec.gen.alpha :as gen])
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
                              ChannelHandlerContext ChannelFutureListener ChannelOption
@@ -28,12 +29,13 @@
 
 ; Bit redundant to spec incoming because Netty will have done some sanity checking.
 ; Still, good for clarity/gen/testing.
-(s/def ::protocol string?) ; TODO #{} from java enum?
+(s/def ::protocol #{"" "HTTP/0.9" "HTTP/1.0" "HTTP/1.1"}) ; TODO HTTP/2.0 and followthrough!
 (s/def ::method #{:get :post :put :patch :delete :head :options :trace}) ; ugh redundant
 (s/def ::path string?) ; TODO improve
 (s/def ::query string?) ;
-(s/def ::headers (s/map-of keyword? (s/or ::single string?
-                                          ::multiple (s/coll-of string? :kind vector?)))) ; TODO lower kw
+(s/def ::headers (s/map-of keyword? ; TODO lower kw
+                   (s/or ::single string?
+                         ::multiple (s/coll-of string? :kind vector?))))
 (s/def ::cookies (s/map-of string? string?))
 
 (s/def ::name string?)
@@ -42,7 +44,8 @@
 (s/def ::content-transfer-encoding string?)
 (s/def ::charset (s/nilable keyword?))
 (s/def ::value any?)
-(s/def ::file #(instance? File %))
+(s/def ::file (s/with-gen #(instance? File %) #(gen/fmap (fn [^String p] (File. p))
+                                                 (gen/string))))
 (s/def ::type any?)
 (s/def ::attachment (s/keys :req-un [(or (and ::name ::charset (or ::value ::file))
                                          (and ::name ::charset ::client-filename
@@ -51,10 +54,27 @@
                                          (and ::name ::type)
                                          (and ::charset (or ::value ::file)))]))
 (s/def ::data (s/coll-of ::attachment :kind vector?))
-(s/def ::content (s/or ::file #(instance? File %) ::string string? ::bytes bytes? ::nil nil?))
+(s/def ::content (s/or ::file ::file ::string string? ::bytes bytes? ::nil nil?))
 
+; Permissive receive, doesn't enforce HTTP semantics
 (s/def ::request (s/keys :req-un [:talk.api/ch ::protocol ::method ::path ::query ::headers]
                          :opt-un [::cookies ::data]))
+
+(s/def ::status #{; See HttpResponseStatus
+                  100 101 102 ; unlikely to use 100s at application level
+                  200 201 202 203 204 205 206 207
+                  300 301 302 303 304 305     307 308
+                  400 401 402 403 404 405 406 407 408 409
+                  410 411 412 413 414 415 416 417
+                      421 422 423 424 425 426     428 429
+                      431
+                  500 501 502 503 504 505 506 507
+                  510 511})
+
+; TODO could enforce HTTP semantics in spec (e.g. (s/and ... checking-fn)
+; (Some like CORS preflight might need to be stateful and therefore elsewhere...)
+(s/def ::response (s/keys :req-un [::status]
+                          :opt-un [::headers ::cookies ::content]))
 
 ; after https://netty.io/4.1/xref/io/netty/example/http/websocketx/server/WebSocketIndexPageHandler.html
 (defn respond!
@@ -80,7 +100,8 @@
         raf (RandomAccessFile. file "r")
         len (.length raf)
         ; connection seems to close prematurely when using DFR directly on file - because lazy open?
-        region (DefaultFileRegion. (.getChannel raf) 0 len) #_(DefaultFileRegion. file 0 len) #_ (ChunkedFile. raf)
+        region (DefaultFileRegion. (.getChannel raf) 0 len)
+               #_(DefaultFileRegion. file 0 len) #_ (ChunkedFile. raf)
         ; NB breaks if no os support for zero-copy; might not work with *netty's* ssl
         hdrs (.headers res)]
     (HttpUtil/setKeepAlive res keep-alive?)

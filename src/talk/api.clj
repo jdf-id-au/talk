@@ -4,9 +4,10 @@
             [talk.http :as http]
             [talk.ws :as ws]
             [hato.websocket :as hws]
-            [clojure.spec.alpha :as s])
+            [clojure.spec.alpha :as s]
+            [clojure.spec.gen.alpha :as gen])
   (:import (io.netty.bootstrap ServerBootstrap)
-           (io.netty.channel ChannelInitializer ChannelId)
+           (io.netty.channel ChannelInitializer ChannelId DefaultChannelId)
            (io.netty.channel.nio NioEventLoopGroup)
            (io.netty.channel.group DefaultChannelGroup)
            (io.netty.channel.socket SocketChannel)
@@ -26,20 +27,24 @@
 
 (defn retag [gen-v tag] gen-v) ; copied from jdf/comfort for the moment
 
-(s/def ::ch #(instance? ChannelId %))
+(s/def ::ch (s/with-gen #(instance? ChannelId %)
+              #(gen/fmap (fn [_] (DefaultChannelId/newInstance)) (s/gen nil?))))
 
 (defmulti message-type :type)
 (defmethod message-type ::connection [_] ::connection) ; spec actually in talk.common
 (defmethod message-type ::http/request [_] ::http/request)
 (defmethod message-type ::ws/text [_] ::ws/text)
 (defmethod message-type ::ws/binary [_] ::ws/binary)
+; :type simplifies dispatch of incoming
 (s/def ::incoming (s/multi-spec message-type retag))
 
-(s/def ::outgoing any?) ; FIXME
+; :type not necessary for outgoing
+(s/def ::outgoing (s/or ::http/response ::http/response
+                        ::ws/text ::ws/text
+                        ::ws/binary ::ws/binary))
 
-#_ (s/def ::ch int?) ; too bored to come up with gen
-#_ (s/def ::http/file bytes?)
-#_ (s/exercise ::http/request)
+#_ (s/exercise ::http/request) ; can't gen ::incoming, maybe because :type not specced
+#_ (s/exercise ::outgoing)
 
 (defn pipeline
   [^String ws-path
