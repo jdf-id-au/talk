@@ -1,0 +1,146 @@
+(ns talk.server
+  (:require [clojure.tools.logging :as log]
+            [clojure.core.async :as async :refer [go go-loop chan <!! >!! <! >!
+                                                  put! close! alt! alt!!]])
+  (:import (io.netty.channel ChannelInitializer ChannelHandlerContext
+                             ChannelInboundHandler ChannelFutureListener ChannelOption)
+           (io.netty.channel.socket SocketChannel)
+           (io.netty.handler.codec.http HttpServerCodec)
+           (io.netty.handler.stream ChunkedWriteHandler)
+           (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler)
+           (io.netty.util ReferenceCountUtil)
+           (io.netty.channel.group ChannelGroup)
+           (java.net InetSocketAddress)
+           (talk.server Aggregatable)))
+
+(defn track-channel
+  "Register channel in `clients` map and report on `in` chan.
+   Map entry is a map containing `type`, `out-sub` and `addr`, and can be updated.
+
+   Usage:
+   - Call from channelActive.
+   - Detect websocket upgrade handshake, using userEventTriggered, and update `clients` map."
+  [^ChannelHandlerContext ctx
+   {:keys [^ChannelGroup channel-group clients in out-pub]}]
+  (let [ch (.channel ctx)
+        id (.id ch)
+        cf (.closeFuture ch)
+        out-sub (chan)]
+    (try (.add channel-group ch)
+         (async/sub out-pub id out-sub)
+         (swap! clients assoc id
+            :type :http ; changed in ws userEventTriggered
+            :out-sub out-sub
+            :addr (-> ch ^InetSocketAddress .remoteAddress .getAddress .toString))
+         (when-not (put! in {:ch id :type :talk.api/connection :connected true})
+           (log/error "Unable to report connection because in chan is closed"))
+         (.addListener cf
+           (reify ChannelFutureListener
+             (operationComplete [_ _]
+               (swap! clients dissoc id)
+               (when-not (put! in {:ch id :type :talk.api/connection :connected false})
+                 (log/error "Unable to report disconnection because in chan is closed")))))
+         (catch Exception e
+           (log/error "Unable to register channel" ch e)
+           (throw e)))))
+
+(defprotocol ChannelInboundMessageHandler
+  "Naming convention adapted from `SimpleChannelInboundHandler`."
+  (channelRead0 [msg broader-context]
+    "Handle specific netty message type.
+     broader-context is map containing netty context and other vals.")
+  ; TODO implement; could split out into separate protocol but overkill for the moment
+  (aggregate [msg so-far] "some kind of type-specific reducing function?"))
+
+(extend-protocol ChannelInboundMessageHandler
+  ; See talk.http and talk.ws. Anything else isn't handled so send to next handler in pipeline.
+  Object
+  (channelRead0 [_ _] false)
+  (aggregate [_ _])
+  nil
+  (channelRead0 [_ _]) ; i.e. nil
+  (aggregate [_ _]))
+
+(defn ^ChannelInboundHandler aggregate-and-handle
+  "Track netty channels and clients.
+   Pass netty messages to handlers.
+   Also pass a chan which can be used for aggregation of messages on each netty channel."
+  [opts]
+  (let [chunks (chan)
+        messages (chan)
+        ; TODO contemplate/measure resource usage from two chans per channel; probably light enough?
+        opts (assoc opts :chunks chunks :messages messages)]
+    (reify ChannelInboundHandler
+      ; TODO ^nil, ^void, or no hint?
+      (^void channelRegistered [_ ^ChannelHandlerContext ctx] (.fireChannelRegistered ctx))
+      (^void channelUnregistered [_ ^ChannelHandlerContext ctx] (.fireChannelUnregistered ctx))
+      (^void channelActive [_ ^ChannelHandlerContext ctx]
+        ; Facilitate backpressure on subsequent reads. Requires manual `(.read ctx)` to indicate readiness.
+        (-> ctx .channel .config (-> (.setAutoRead false)
+        ; May be needed for response from outside netty event loop:
+        ; https://stackoverflow.com/a/48128514/780743
+                                     (.setOption ChannelOption/ALLOW_HALF_CLOSURE true)))
+        (track-channel ctx opts)
+        (.read ctx))
+      (^void channelInactive [_ ^ChannelHandlerContext ctx] (.fireChannelInactive ctx))
+      (^void channelRead [_ ^ChannelHandlerContext ctx msg]
+        ; Adapted from SimpleChannelInboundHandler
+        #_(let [release? (volatile! true)]
+            (try (when-not (channelRead0 msg ctx)
+                   (vreset! release? false)
+                   (.fireChannelRead ctx msg))
+                 (finally (when @release? (ReferenceCountUtil/release msg)))))
+        (try (channelRead0 msg (assoc opts :ctx ctx)) ; channelRead0 needs to release msg when done
+          (catch Exception e (ReferenceCountUtil/release msg) (throw e)))
+        nil)
+      (^void channelReadComplete [_ ^ChannelHandlerContext ctx] (.fireChannelReadComplete ctx))
+      (^void userEventTriggered [_ ^ChannelHandlerContext ctx evt] (.fireUserEventTriggered ctx evt))
+      (^void channelWritabilityChanged [_ ^ChannelHandlerContext ctx] (.fireChannelWritabilityChanged ctx))
+      (^void exceptionCaught [_ ^ChannelHandlerContext ctx ^Throwable cause] (.fireExceptionCaught ctx cause)))))
+      ; ChannelHandler methods
+      ;(handlerAdded [_ ^ChannelHandlerContext ctx])
+      ;(handlerRemoved [_ ^ChannelHandlerContext ctx])))
+
+(defn pipeline
+  [^String ws-path
+   {:keys [^long max-content-length ; max HTTP upload
+           ^int handshake-timeout
+           ^int max-frame-size
+           ^long max-message-size] ; max WS message
+    :or {max-content-length (* 1024 1024)
+         handshake-timeout (* 5 1000)
+         max-frame-size (* 64 1024)
+         max-message-size (* 1024 1024)}
+    :as opts}]
+  (proxy [ChannelInitializer] []
+    (initChannel [^SocketChannel ch]
+      (doto (.pipeline ch)
+        ; TODO could add handlers selectively according to need (from within the channel)
+        (.addLast "http" (HttpServerCodec.)) ; TODO could tune chunk size
+        ; less network but more memory
+        #_(.addLast "http-compr" (HttpContentCompressor.))
+        #_(.addLast "http-decompr" (HttpContentDecompressor.))
+        ; inbound only https://stackoverflow.com/a/38947978/780743
+
+        ; TODO replace with functionality in main handler
+        #_(.addLast "http-agg" (HttpObjectAggregator. max-content-length))
+        ; FIXME obviously DDOS risk so conditionally add to pipeline once auth'd?
+        #_(.addLast "http-disk-agg" (DiskHttpObjectAggregator. max-content-length))
+
+        (.addLast "streamer" (ChunkedWriteHandler.))
+        #_ (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions below
+        (.addLast "ws" (WebSocketServerProtocolHandler.
+                         ; TODO [application] could specify subprotocol?
+                         ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
+                         ws-path nil true max-frame-size handshake-timeout))
+
+        ; TODO replace with functionality in main handler
+        #_(.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
+        ; FIXME debug design/ref counting
+        #_(.addLast "ws-disk-agg" (DiskWebSocketFrameAggregator. max-message-size))
+
+        ; These handlers are functions returning proxy or reify, i.e. new instance per channel:
+        ; (See `ChannelHandler` doc regarding state.)
+        ;(.addLast "ws-handler" (ws/handler (assoc admin :type :ws)))
+        ;(.addLast "http-handler" (http/handler (assoc admin :type :http)))))))
+        (.addLast "handler" (aggregate-and-handle opts))))))

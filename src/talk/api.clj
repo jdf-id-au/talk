@@ -1,35 +1,26 @@
 (ns talk.api
   (:require [clojure.tools.logging :as log]
             [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! take! put! close!]]
+            [talk.server :as server]
             [talk.http :as http]
             [talk.ws :as ws]
             [hato.websocket :as hws]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen])
   (:import (io.netty.bootstrap ServerBootstrap)
-           (io.netty.channel ChannelInitializer ChannelId DefaultChannelId)
+           (io.netty.channel ChannelId DefaultChannelId)
            (io.netty.channel.nio NioEventLoopGroup)
            (io.netty.channel.group DefaultChannelGroup)
-           (io.netty.channel.socket SocketChannel)
            (io.netty.channel.socket.nio NioServerSocketChannel)
            (io.netty.util.concurrent GlobalEventExecutor)
-           (java.net InetSocketAddress)
-           (io.netty.handler.codec.http HttpServerCodec
-                                        HttpContentCompressor HttpContentDecompressor
-                                        HttpContentEncoder HttpContentDecoder
-                                        HttpObjectAggregator HttpVersion DiskHttpObjectAggregator)
-           (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler
-                                                   WebSocketFrameAggregator
-                                                   DiskWebSocketFrameAggregator)
-           (io.netty.handler.codec.http.websocketx.extensions.compression
-             WebSocketServerCompressionHandler)
-           (io.netty.handler.stream ChunkedWriteHandler)
-           (java.io File)))
+           (java.net InetSocketAddress)))
 
 (defn retag [gen-v tag] gen-v) ; copied from jdf/comfort for the moment
 
 (s/def ::ch (s/with-gen #(instance? ChannelId %)
               #(gen/fmap (fn [_] (DefaultChannelId/newInstance)) (s/gen nil?))))
+(s/def ::connected boolean?)
+(s/def ::connection (s/keys [:req-un [::ch ::connected]]))
 
 (defmulti message-type :type)
 (defmethod message-type ::connection [_] ::connection) ; spec actually in talk.common
@@ -47,44 +38,6 @@
 #_ (s/exercise ::http/request) ; can't gen ::incoming, maybe because :type not specced
 #_ (s/exercise ::outgoing)
 
-(defn pipeline
-  [^String ws-path
-   {:keys [^long max-content-length ; max HTTP upload
-           ^int handshake-timeout
-           ^int max-frame-size
-           ^long max-message-size] ; max WS message
-    :or {max-content-length (* 1024 1024)
-         handshake-timeout (* 5 1000)
-         max-frame-size (* 64 1024)
-         max-message-size (* 1024 1024)}
-    :as opts}
-   admin] ; admin is handler-opts merged with other kvs (see caller)
-  (proxy [ChannelInitializer] []
-    (initChannel [^SocketChannel ch]
-      (doto (.pipeline ch)
-        ; TODO could add selectively according to need
-        (.addLast "http" (HttpServerCodec.))
-        ; less network but more memory
-        #_(.addLast "http-compr" (HttpContentCompressor.))
-        #_(.addLast "http-decompr" (HttpContentDecompressor.))
-        ; inbound only https://stackoverflow.com/a/38947978/780743
-        #_(.addLast "http-agg" (HttpObjectAggregator. max-content-length))
-        ; FIXME obviously DDOS risk so conditionally add to pipeline once auth'd?
-        #_(.addLast "http-disk-agg" (DiskHttpObjectAggregator. max-content-length))
-        (.addLast "streamer" (ChunkedWriteHandler.))
-        #_ (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions below
-        (.addLast "ws" (WebSocketServerProtocolHandler.
-                         ; TODO [application] could specify subprotocol?
-                         ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
-                         ws-path nil true max-frame-size handshake-timeout))
-        #_(.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
-        ; FIXME debug design/ref counting
-        #_(.addLast "ws-disk-agg" (DiskWebSocketFrameAggregator. max-message-size))
-        ; These handlers are functions returning proxy or reify, i.e. new instance per channel:
-        ; (See `ChannelHandler` doc regarding state.)
-        (.addLast "ws-handler" (ws/handler (assoc admin :type :ws)))
-        (.addLast "http-handler" (http/handler (assoc admin :type :http)))))))
-
 (defn server!
   "Bootstrap a Netty server connected to core.async channels:
     `in` - from which application takes incoming messages (could pub with reference to @clients :type)
@@ -96,7 +49,7 @@
    Websocket path defaults to /ws. Doesn't support Server Sent Events or long polling at present."
   ; TODO adjust messages to be suitable for spec conformation (see above)
   ([port] (server! port {}))
-  ([port {:keys [ws-path in-buffer out-buffer handler-opts]
+  ([port {:keys [ws-path in-buffer out-buffer]
           :or {ws-path "/ws" in-buffer 1 out-buffer 1}
           :as opts}]
    (let [; TODO look at aleph for epoll, thread number specification
@@ -107,22 +60,20 @@
          ; therefore store metadata in parallel atom:
          ; also for administering sub(scription)s
          clients (atom {})
-         in (chan in-buffer)
-         out (chan out-buffer)
-         out-pub (async/pub out :ch)
+         in (chan in-buffer) ; messages to application from server's handlers
+         out (chan out-buffer) ; messages from application
+         out-pub (async/pub out :ch) ; ...to server's handler for that netty channel
          evict (fn [id] (some-> channel-group (.find id) .close))]
      (try (let [bootstrap (doto (ServerBootstrap.)
                             ; TODO any need for separate parent and child groups?
                             (.group loop-group)
                             (.channel NioServerSocketChannel)
                             (.localAddress ^int (InetSocketAddress. port))
-                            (.childHandler (pipeline ws-path
-                                             (dissoc opts :handler-opts)
-                                             (merge handler-opts
+                            (.childHandler (server/pipeline ws-path
+                                             (merge opts
                                                {:channel-group channel-group
                                                 :clients clients
-                                                :in in
-                                                :out-pub out-pub}))))
+                                                :in in :out-pub out-pub}))))
                 ; I think sync here causes binding to fail here rather than later
                 server-cf (-> bootstrap .bind .sync)]
             {:close (fn [] (close! out)

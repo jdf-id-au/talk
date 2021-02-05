@@ -1,6 +1,7 @@
 (ns talk.http
-  (:require [talk.common :as common]
-            [clojure.tools.logging :as log]
+  "Parse http requests and forward to `in` with backpressure.
+   Respond asynchronously from `out-sub` or timeout."
+  (:require [clojure.tools.logging :as log]
             [clojure.core.async :as async :refer [go go-loop chan <!! >!! <! >!
                                                   put! close! alt! alt!!]]
             [clojure.string :as str]
@@ -9,13 +10,13 @@
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
                              ChannelHandlerContext ChannelFutureListener ChannelOption
-                             DefaultFileRegion ChannelInboundHandler)
+                             DefaultFileRegion)
            (io.netty.handler.codec.http HttpUtil
                                         DefaultFullHttpResponse DefaultHttpResponse
                                         HttpResponseStatus
                                         FullHttpRequest FullHttpResponse
                                         HttpHeaderNames QueryStringDecoder HttpMethod HttpResponse
-                                        DiskHttpObjectAggregator$AggregatedFullHttpRequest)
+                                        DiskHttpObjectAggregator$AggregatedFullHttpRequest HttpRequest HttpContent LastHttpContent)
            (io.netty.util CharsetUtil)
            (io.netty.handler.codec.http.cookie ServerCookieDecoder ServerCookieEncoder Cookie)
            (io.netty.handler.codec.http.multipart HttpPostRequestDecoder
@@ -26,8 +27,8 @@
                                                   MixedFileUpload MixedAttribute)
            (java.io File RandomAccessFile)
            (java.net URLConnection)
-           (io.netty.handler.stream ChunkedFile)
-           (io.netty.handler.codec MixedData)))
+           (io.netty.handler.codec MixedData)
+           (talk.server ChannelInboundMessageHandler)))
 
 ; Bit redundant to spec incoming because Netty will have done some sanity checking.
 ; Still, good for clarity/gen/testing.
@@ -190,7 +191,7 @@
                                    ; May be needed for response from outside netty event loop:
                                    ; https://stackoverflow.com/a/48128514/780743
                                    (.setOption ChannelOption/ALLOW_HALF_CLOSURE true)))
-      (common/track-channel ctx admin)
+      (track-channel ctx admin)
       (.read ctx)) ; first read
     (channelRead0 [^ChannelHandlerContext ctx ^FullHttpRequest req]
       (if (-> req .decoderResult .isSuccess)
@@ -296,18 +297,29 @@
       (log/error "Error in http handler" cause)
       (.close ctx))))
 
-(defn ^ChannelInboundHandler unaggregated-handler
-  "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub` or timeout."
-  {:keys [clients in handler-timeout]
-   :or {handler-timeout (* 5 1000)}
-   :as admin}
-  (reify ChannelInboundHandler
-    (channelRegistered [_ ctx] (.fireChannelRegistered ctx))
-    (channelUnregistered [_ ctx] (.fireChannelUnregistered ctx))
-    (channelActive [_ ctx] (.fireChannelActive ctx))
-    (channelInactive [_ ctx] (.fireChannelInactive ctx))
-    (channelRead [_ ctx msg] (.fireChannelRead ctx msg))
-    (channelReadComplete [_ ctx] (.fireChannelReadComplete ctx))
-    (userEventTriggered [_ ctx evt] (.fireUserEventTriggered ctx evt))
-    (channelWritabilityChanged [_ ctx] (.fireChannelWritabilityChanged ctx))
-    (exceptionCaught [_ ctx cause] (.fireExceptionCaught ctx cause))))
+(defn put [bc port-kw msg]
+  (or (put! (get bc port-kw) msg #(when % (.read (:ctx bc))))
+      (log/error "Dropped incoming http message because" port-kw "channel is closed." msg)))
+  ; TODO throw something?
+
+(extend-protocol ChannelInboundMessageHandler
+  ; Interface graph:
+  ;   HttpContent
+  ;     -> LastHttpContent
+  ;          |-> FullHttpMessage
+  ;   HttpMessage  |-> FullHttpRequest
+  ;     -> HttpRequest
+  FullHttpRequest
+  ; TODO confirm that (hopefully) this is "more specific" than LastHttpContent
+  ; and so can be used to identify non-chunked messages.
+  (channelRead0 [msg bc] (put bc :messages msg))
+  (aggregate [_ _])
+  HttpRequest
+  (channelRead0 [msg bc] (put bc :chunks msg))
+  (aggregate [msg so-far])
+  HttpContent
+  (channelRead0 [msg bc] (put bc :chunks msg))
+  (aggregate [msg so-far])
+  LastHttpContent
+  (channelRead0 [msg bc] (put bc :chunks msg))
+  (aggregate [msg so-far]))
