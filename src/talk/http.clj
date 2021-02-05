@@ -31,7 +31,9 @@
                                                   MixedFileUpload MixedAttribute)
            (java.io File RandomAccessFile)
            (java.net URLConnection)
-           (io.netty.handler.codec MixedData)))
+           (io.netty.handler.codec MixedData)
+           (java.nio.file Files)
+           (java.nio.channels FileChannel)))
 
 ; Bit redundant to spec incoming because Netty will have done some sanity checking.
 ; Still, good for clarity/gen/testing.
@@ -346,11 +348,11 @@
 
 (defrecord Disk [meta file stream]
   Aggregator
-  (accept [this msg bc]))
+  (accept [so-far msg bc]))
 
 (defrecord Memory [meta content]
   Aggregator
-  (accept [this msg bc]))
+  (accept [so-far msg bc]))
 
 ; "Don't extend in lib if don't own both protocol and target type."
 ;(extend-type nil
@@ -359,10 +361,13 @@
 ;    (if (some->> bc ::content-length (> (:size-threshold bc)))
 ;      (->Memory (atom msg)))))
 
-(defn from-scratch [this msg bc]
-  (if (some->> bc ::content-length (> (:size-threshold bc)))
-    (->Memory (atom msg))))
-    ;(->Disk (io/writer) msg)))
+(defn store [so-far msg bc]
+  {:pre [(nil? so-far)]}
+  (if (some-> bc ::content-length (> (:size-threshold bc)))
+    (->Memory msg nil)
+    (let [tf (Files/createTempFile "talk" "http-agg" [])
+          fc (FileChannel/open tf [])]
+      (->Disk msg tf fc))))
 
 (extend-protocol ChannelInboundMessageHandler
   ; Interface graph:
@@ -392,7 +397,8 @@
               (case method
                 :post nil ; TODO delegate aggregation to HttpPostRequestDecoder somehow
                 (if (ReferenceCountUtil/release msg)
-                    [::start (from-scratch so-far (assoc parsed ::content-length length) bc)]
+                    ; ::content-length redundant with the corresponding header but better-parsed
+                    [::start (store so-far parsed (assoc bc ::content-length length))]
                     [::release-failed]))))))))
 
   HttpContent

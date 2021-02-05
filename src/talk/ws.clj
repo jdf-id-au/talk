@@ -95,11 +95,11 @@
 
 (defrecord Disk [meta file stream]
   Aggregator
-  (accept [this msg bc]))
+  (accept [so-far msg bc]))
 
 (defrecord Memory [meta content]
   Aggregator
-  (accept [this msg bc]))
+  (accept [so-far msg bc]))
 
 (extend-protocol ChannelInboundMessageHandler
   TextWebSocketFrame
