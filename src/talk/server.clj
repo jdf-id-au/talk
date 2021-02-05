@@ -11,7 +11,8 @@
            (io.netty.util ReferenceCountUtil)
            (io.netty.channel.group ChannelGroup)
            (java.net InetSocketAddress)
-           (talk.server Aggregatable)))
+           (talk.server Aggregatable)
+           (io.netty.handler.codec MessageAggregator)))
 
 (defn track-channel
   "Register channel in `clients` map and report on `in` chan.
@@ -50,16 +51,34 @@
     "Handle specific netty message type.
      broader-context is map containing netty context and other vals.")
   ; TODO implement; could split out into separate protocol but overkill for the moment
-  (aggregate [msg so-far] "some kind of type-specific reducing function?"))
+  (offer [msg so-far] "Ask for msg to be aggregated into so-far. Report [status result]."))
+
+(defprotocol Aggregator
+  (accept [so-far msg] "Attempt to aggregate msg into so-far."))
 
 (extend-protocol ChannelInboundMessageHandler
   ; See talk.http and talk.ws. Anything else isn't handled so send to next handler in pipeline.
   Object
   (channelRead0 [_ _] false)
-  (aggregate [_ _])
+  (offer [_ _])
   nil
   (channelRead0 [_ _]) ; i.e. nil
-  (aggregate [_ _]))
+  (offer [_ _]))
+
+(defn aggregator
+  "Aggregate from chunks chan into messages chan."
+  [chunks messages]
+  (go-loop [msg (<! chunks)
+            so-far nil] ; TODO profile; contemplate transient/volatile/...?
+    (if msg
+      (let [[status result] (offer msg so-far)]
+        (case status
+          (:start :ok) (recur (<! chunks) result)
+          (:finish) (if (>! messages result) (recur (<! chunks) nil)
+                      (log/info "messages chan closed, dropping" result))
+          (log/warn "Aggregation failed: " (or status "(no status code)")
+            "\nMessage:" msg "\nAggregator:" so-far)))
+      (log/info "chunks chan closed, managed to make" (or so-far "nothing")))))
 
 (defn ^ChannelInboundHandler aggregate-and-handle
   "Track netty channels and clients.
@@ -68,6 +87,7 @@
   [opts]
   (let [chunks (chan)
         messages (chan)
+        _ (aggregator chunks messages) ; TODO make use of return channel value?
         ; TODO contemplate/measure resource usage from two chans per channel; probably light enough?
         opts (assoc opts :chunks chunks :messages messages)]
     (reify ChannelInboundHandler

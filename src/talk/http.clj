@@ -28,7 +28,7 @@
            (java.io File RandomAccessFile)
            (java.net URLConnection)
            (io.netty.handler.codec MixedData)
-           (talk.server ChannelInboundMessageHandler)))
+           (talk.server ChannelInboundMessageHandler Aggregator)))
 
 ; Bit redundant to spec incoming because Netty will have done some sanity checking.
 ; Still, good for clarity/gen/testing.
@@ -302,6 +302,14 @@
       (log/error "Dropped incoming http message because" port-kw "channel is closed." msg)))
   ; TODO throw something?
 
+(defrecord Memory [content]
+  Aggregator
+  (accept [this msg]))
+
+(defrecord Disk [file]
+  Aggregator
+  (accept [this msg]))
+
 (extend-protocol ChannelInboundMessageHandler
   ; Interface graph:
   ;   HttpContent
@@ -313,13 +321,23 @@
   ; TODO confirm that (hopefully) this is "more specific" than LastHttpContent
   ; and so can be used to identify non-chunked messages.
   (channelRead0 [msg bc] (put bc :messages msg))
-  (aggregate [_ _])
+  (offer [_ _])
   HttpRequest
   (channelRead0 [msg bc] (put bc :chunks msg))
-  (aggregate [msg so-far])
+  (offer [msg so-far]
+    (if so-far
+      [:not-first]
+      (if-not (-> msg .decoderResult .isSuccess)
+        [:decoder-fail]
+        [:start (->Memory (atom))])))
+
   HttpContent
   (channelRead0 [msg bc] (put bc :chunks msg))
-  (aggregate [msg so-far])
+  (offer [msg so-far])
+    ; TODO probably do need to deal with nil so-far
   LastHttpContent
   (channelRead0 [msg bc] (put bc :chunks msg))
-  (aggregate [msg so-far]))
+  (offer [msg so-far]
+    ; TODO deal with nil so-far?
+    [:last]))
+
