@@ -7,9 +7,8 @@
             [clojure.string :as str]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
-            [talk.server :as server :refer [Aggregator ChannelInboundMessageHandler
-                                            accept]]
-            [clojure.java.io :as io])
+            [talk.server :as server :refer [ChannelInboundMessageHandler offer
+                                            Aggregator accept]])
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
                              ChannelHandlerContext ChannelFutureListener ChannelOption
@@ -19,7 +18,6 @@
                                         HttpResponseStatus
                                         FullHttpRequest FullHttpResponse
                                         HttpHeaderNames QueryStringDecoder HttpMethod HttpResponse
-                                        DiskHttpObjectAggregator$AggregatedFullHttpRequest
                                         HttpRequest HttpContent LastHttpContent)
            (io.netty.util CharsetUtil ReferenceCountUtil)
            (io.netty.handler.codec.http.cookie ServerCookieDecoder ServerCookieEncoder Cookie)
@@ -30,10 +28,7 @@
                                                   DiskFileUpload DiskAttribute
                                                   MixedFileUpload MixedAttribute)
            (java.io File RandomAccessFile)
-           (java.net URLConnection)
-           (io.netty.handler.codec MixedData)
-           (java.nio.file Files)
-           (java.nio.channels FileChannel)))
+           (java.net URLConnection)))
 
 ; Bit redundant to spec incoming because Netty will have done some sanity checking.
 ; Still, good for clarity/gen/testing.
@@ -126,7 +121,6 @@
    NB data >16kB will be stored in tempfiles, which will be lost on JVM shutdown.
    Must cleanup after response sent; this will also remove tempfiles."
   ; NB limited by needing to fit in memory because of HttpObjectAggregator,
-  ; which I failed to reimplement to have disk backing.
   ; after https://gist.github.com/breznik/6215834
   ; TODO protect against file upload abuse somehow
   ; (partly protected by max-content-length and backpressure)
@@ -135,7 +129,7 @@
     (set! (. DiskFileUpload baseDirectory) nil) ; system temp directory
     (set! (. DiskAttribute deleteOnExitTemporaryFile) true)
     (set! (. DiskAttribute baseDirectory) nil)
-    (fn [^DiskHttpObjectAggregator$AggregatedFullHttpRequest req]
+    (fn [^FullHttpRequest req]
       (condp contains? (.method req)
         #{HttpMethod/POST}
         ; FIXME might be much easier just to support PUT and PATCH for huge files?
@@ -170,16 +164,12 @@
         #{HttpMethod/PUT HttpMethod/PATCH}
         (let [charset (HttpUtil/getCharset req)
               base {:charset (-> charset .toString keyword)}
-              #_#_u (doto (.createAttribute data-factory req "put or post")
-                      (.setContent (-> req .retain .content)))]
+              u (doto (.createAttribute data-factory req "put or post")
+                  (.setContent (-> req .retain .content)))]
           {:cleanup #(.cleanRequestHttpData data-factory req)
-           :data #_(vector (if (.isInMemory u)
-                             (assoc base :value (.get u))
-                             (assoc base :file (.getFile u))))
-           ; from struggles with DiskHttpObjectAggregator:
-                 (vector (if (.isInMemory req)
-                           (assoc base :value (.get ^MixedData (.retain req)))
-                           (assoc base :file (.getFile ^MixedData (.retain req)))))})
+           :data (vector (if (.isInMemory u)
+                           (assoc base :value (.get u))
+                           (assoc base :file (.getFile u))))})
         ; else
         nil))))
 
@@ -303,6 +293,7 @@
       (.close ctx))))
 
 (defn parse-req
+  "Parse out nearly everything from HttpRequest except body."
   [{:keys [ctx] :as bc} ^HttpRequest req]
   (let [qsd (-> req .uri QueryStringDecoder.)
         {:keys [headers cookies]}
@@ -334,53 +325,39 @@
      :protocol (-> req .protocolVersion .toString)
      :headers headers
      :cookies cookies
-     :keep-alive? (HttpUtil/isKeepAlive req)}))
+     :keep-alive? (HttpUtil/isKeepAlive req)
+     :content-length (and (HttpUtil/isContentLengthSet req) (HttpUtil/getContentLength req))}))
     ; not accommodating body for GET, DELETE, TRACE, OPTIONS or HEAD
     ; (not data) (assoc :content (some-> req .content (.toString (HttpUtil/getCharset req))))))
 
-(defn put [bc port-kw msg]
-  (or (put! (get bc port-kw)
-            (case port-kw :chunks [bc msg] :messages msg)
-            #(when % (.read (:ctx bc))))
-      (log/error "Dropped incoming http message because" port-kw "channel is closed." msg)))
-  ; TODO throw something?
-
-
-(defrecord Disk [meta file stream]
-  Aggregator
-  (accept [so-far msg bc]))
-
-(defrecord Memory [meta content]
-  Aggregator
-  (accept [so-far msg bc]))
-
-; "Don't extend in lib if don't own both protocol and target type."
-;(extend-type nil
-;  Aggregator
-;  (accept [this msg bc]
-;    (if (some->> bc ::content-length (> (:size-threshold bc)))
-;      (->Memory (atom msg)))))
-
-(defn store [so-far msg bc]
+(defn store
+  "Put processed msg in appropriate record."
+  [so-far msg bc]
   {:pre [(nil? so-far)]}
   (if (some-> bc ::content-length (> (:size-threshold bc)))
-    (->Memory msg nil)
-    (let [tf (Files/createTempFile "talk" "http-agg" [])
-          fc (FileChannel/open tf [])]
-      (->Disk msg tf fc))))
+    ; Over threshold
+    (apply ->Disk msg (tempfile "http-agg"))
+    ; Under threshold or not stated
+    (->Memory msg nil)))
+
+(defn put
+  "Put message on specified chan."
+  [bc chan-key msg]
+  (or (put! (get bc chan-key) (case chan-key :chunks [bc msg] :messages msg)
+        #(when % (.read (:ctx bc))))
+    (log/error "Dropped incoming http message because" chan-key "channel is closed." msg)))
+      ; TODO throw something?
 
 (extend-protocol ChannelInboundMessageHandler
-  ; Interface graph:
+  ; Interface graph (dispatch on "most specific"):
   ;   HttpContent
   ;     -> LastHttpContent
   ;          |-> FullHttpMessage
   ;   HttpMessage  |-> FullHttpRequest
   ;     -> HttpRequest
 
-  FullHttpRequest
-  ; TODO confirm that (hopefully) this is "more specific" than LastHttpContent
-  ; and so can be used to identify non-chunked messages.
-  (channelRead0 [msg bc] (put bc :messages msg))
+  FullHttpRequest ; FIXME need to deal with content if present
+  (channelRead0 [msg bc] (put bc :messages (parse-req bc msg)))
   (offer [_ _ _])
 
   HttpRequest
@@ -399,17 +376,22 @@
                 (if (ReferenceCountUtil/release msg)
                     ; ::content-length redundant with the corresponding header but better-parsed
                     [::start (store so-far parsed (assoc bc ::content-length length))]
-                    [::release-failed]))))))))
+                    [::release-fail]))))))))
 
   HttpContent
   (channelRead0 [msg bc] (put bc :chunks msg))
   (offer [msg so-far bc]
     (if-not so-far
       [::first-missing]
+      ; TODO stream content either to memory (how exactly?) or disk;
+      ; check if size grows to exceed size-threshold and release netty resource
       [::ok (accept so-far msg bc)]))
 
   LastHttpContent
   (channelRead0 [msg bc] (put bc :chunks msg))
   (offer [msg so-far bc]
     ; TODO deal with nil so-far?
-    [:last]))
+    (if-not so-far
+      [::prev-missing]
+      (let [] ; TODO process msg as above and release netty resource
+        [::last (accept so-far)]))))

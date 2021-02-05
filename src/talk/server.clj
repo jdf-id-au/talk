@@ -10,7 +10,9 @@
            (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler)
            (io.netty.util ReferenceCountUtil)
            (io.netty.channel.group ChannelGroup)
-           (java.net InetSocketAddress)))
+           (java.net InetSocketAddress)
+           (java.nio.file Path Files StandardOpenOption)
+           (java.nio.channels SeekableByteChannel)))
 
 (defn track-channel
   "Register channel in `clients` map and report on `in` chan.
@@ -48,20 +50,27 @@
   (channelRead0 [msg broader-context]
     "Handle specific netty message type.")
   (offer [msg so-far broader-context]
-    "Ask for msg to be aggregated into so-far. Return [status result broader-context]."))
-
-; "Don't extend in lib if don't own both protocol and target type."
-;(extend-protocol ChannelInboundMessageHandler
-;  ; See talk.http and talk.ws. Anything else isn't handled so send to next handler in pipeline.
-;  Object
-;  (channelRead0 [_ _] false)
-;  (offer [_ _ _])
-;  nil
-;  (channelRead0 [_ _]) ; i.e. nil
-;  (offer [_ _ _]))
+    "Ask for processed message to be aggregated into so-far.
+     Return [status result broader-context]."))
 
 (defprotocol Aggregator
   (accept [so-far msg broader-context] "Attempt to aggregate processed msg into so-far."))
+
+(defn tempfile
+  "Return a new tempfile path and its open SeekableByteChannel."
+  ; ClosedByInterruptException risk?? https://stackoverflow.com/a/42409658/780743
+  [suffix]
+  (let [path (Files/createTempFile "talk" suffix [])
+        ch (Files/newByteChannel path [StandardOpenOption/CREATE_NEW StandardOpenOption/WRITE])]
+    [path ch]))
+
+(defrecord Disk [meta ^Path path ^SeekableByteChannel channel]
+  Aggregator
+  (accept [so-far msg bc]))
+
+(defrecord Memory [meta ^bytes content]
+  Aggregator
+  (accept [so-far msg bc]))
 
 (defn aggregator
   "Aggregate from chunks chan into messages chan."
@@ -86,35 +95,37 @@
   (let [chunks (chan)
         messages (chan)
         _ (aggregator chunks messages) ; TODO make use of return channel value?
-        ; TODO contemplate/measure resource usage from two chans per channel; probably light enough?
+        ; TODO assess resource usage from two chans per channel; probably light enough?
         opts (assoc opts :chunks chunks :messages messages)]
     (reify ChannelInboundHandler
       ; TODO ^nil, ^void, or no hint?
-      (^void channelRegistered [_ ^ChannelHandlerContext ctx] (.fireChannelRegistered ctx))
-      (^void channelUnregistered [_ ^ChannelHandlerContext ctx] (.fireChannelUnregistered ctx))
-      (^void channelActive [_ ^ChannelHandlerContext ctx]
-        ; Facilitate backpressure on subsequent reads. Requires manual `(.read ctx)` to indicate readiness.
+      (channelRegistered [_ ^ChannelHandlerContext ctx] (.fireChannelRegistered ctx))
+      (channelUnregistered [_ ^ChannelHandlerContext ctx] (.fireChannelUnregistered ctx))
+      (channelActive [_ ^ChannelHandlerContext ctx]
+        ; Facilitate backpressure on subsequent reads.
+        ; Requires manual `(.read ctx)` to indicate readiness.
         (-> ctx .channel .config (-> (.setAutoRead false)
         ; May be needed for response from outside netty event loop:
         ; https://stackoverflow.com/a/48128514/780743
                                      (.setOption ChannelOption/ALLOW_HALF_CLOSURE true)))
         (track-channel ctx opts)
         (.read ctx))
-      (^void channelInactive [_ ^ChannelHandlerContext ctx] (.fireChannelInactive ctx))
-      (^void channelRead [_ ^ChannelHandlerContext ctx msg]
+      (channelInactive [_ ^ChannelHandlerContext ctx] (.fireChannelInactive ctx))
+      (channelRead [_ ^ChannelHandlerContext ctx msg]
         ; Adapted from SimpleChannelInboundHandler
         #_(let [release? (volatile! true)]
             (try (when-not (channelRead0 msg ctx)
                    (vreset! release? false)
                    (.fireChannelRead ctx msg))
                  (finally (when @release? (ReferenceCountUtil/release msg)))))
-        (try (channelRead0 msg (assoc opts :ctx ctx)) ; channelRead0 needs to release msg when done
+        (try (channelRead0 msg (assoc opts :ctx ctx))
           (catch Exception e (ReferenceCountUtil/release msg) (throw e)))
+          ; channelRead0 needs to release msg when done!
         nil)
-      (^void channelReadComplete [_ ^ChannelHandlerContext ctx] (.fireChannelReadComplete ctx))
-      (^void userEventTriggered [_ ^ChannelHandlerContext ctx evt] (.fireUserEventTriggered ctx evt))
-      (^void channelWritabilityChanged [_ ^ChannelHandlerContext ctx] (.fireChannelWritabilityChanged ctx))
-      (^void exceptionCaught [_ ^ChannelHandlerContext ctx ^Throwable cause] (.fireExceptionCaught ctx cause)))))
+      (channelReadComplete [_ ^ChannelHandlerContext ctx] (.fireChannelReadComplete ctx))
+      (userEventTriggered [_ ^ChannelHandlerContext ctx evt] (.fireUserEventTriggered ctx evt))
+      (channelWritabilityChanged [_ ^ChannelHandlerContext ctx] (.fireChannelWritabilityChanged ctx))
+      (exceptionCaught [_ ^ChannelHandlerContext ctx ^Throwable cause] (.fireExceptionCaught ctx cause)))))
       ; ChannelHandler methods
       ;(handlerAdded [_ ^ChannelHandlerContext ctx])
       ;(handlerRemoved [_ ^ChannelHandlerContext ctx])))

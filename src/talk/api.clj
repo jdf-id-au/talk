@@ -39,7 +39,8 @@
 #_ (s/exercise ::outgoing)
 
 (def defaults
-  "Starts as `opts` and eventually becomes `broader-context`. May have netty context at :ctx."
+  "Starts as `opts` and eventually becomes `broader-context` aka `bc`.
+   May have netty context at :ctx."
   ; TODO spec opts (and follow through!) probably need real config system
   {; Toplevel
    :ws-path "/ws" :in-buffer 1 :out-buffer 1
