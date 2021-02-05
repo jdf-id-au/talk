@@ -40,7 +40,7 @@
 
 (def defaults
   "Starts as `opts` and eventually becomes `broader-context` aka `bc`.
-   May have netty context at :ctx."
+   Reified channelRead in handler adds netty context at :ctx."
   ; TODO spec opts (and follow through!) probably need real config system
   {; Toplevel
    :ws-path "/ws" :in-buffer 1 :out-buffer 1
@@ -49,7 +49,7 @@
    ; WebSocket
    :handshake-timeout (* 5 1000) :max-frame-size (* 64 1024) :max-message-size (* 1024 1024)
    ; HTTP
-   :max-content-length (* 1 1024 1024)})
+   :max-content-length (long (* 1 1024 1024))})
 
 (defn server!
   "Bootstrap a Netty server connected to core.async channels:
@@ -85,7 +85,9 @@
                                              (merge opts
                                                {:channel-group channel-group
                                                 :clients clients
-                                                :in in :out-pub out-pub}))))
+                                                :in in :out-pub out-pub
+                                                ; avoid dep cycle
+                                                :ws-send ws/send!}))))
                 ; I think sync here causes binding to fail here rather than later
                 server-cf (-> bootstrap .bind .sync)]
             {:close (fn [] (close! out)

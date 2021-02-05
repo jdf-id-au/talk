@@ -7,6 +7,7 @@
             [clojure.string :as str]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
+            [talk.util :as util]
             [talk.server :as server :refer [ChannelInboundMessageHandler offer
                                             Aggregator accept]])
   (:import (io.netty.buffer Unpooled ByteBuf)
@@ -360,8 +361,34 @@
   (channelRead0 [msg bc] (put bc :messages (parse-req bc msg)))
   (offer [_ _ _])
 
+  ; channelRead0 of HttpRequest, HttpContent and LastHttpContent
+  ; are derived from MessageAggregator -> HttpObjectAggregator.
+  ; Java's access modifiers are really annoying.
+
   HttpRequest
-  (channelRead0 [msg bc] (put bc :chunks msg))
+  (channelRead0 [msg {:keys [^ChannelHandlerContext ctx state
+                             ^long max-content-length] :as bc}]
+    ; TODO *** hammer through impl, just for http, then contemplate best way to incl ws/refactor
+    ; continue response
+    (if-let [continueResponse (util/continueResponse msg max-content-length (.pipeline ctx))]
+      (let [listener (reify ChannelFutureListener
+                       (operationComplete [_ cf]
+                         (when-not (.isSuccess cf) (.fireExceptionCaught ctx (.cause cf)))))
+            closeOnExpectationFailed false ; config
+            hOM (util/ignoreContentAfterContinueResponse continueResponse)
+            closeAfterWrite (and closeOnExpectationFailed hOM)
+            future (-> ctx (.writeAndFlush continueResponse) (.addListener listener))]
+        (swap! state assoc
+          :handlingOversizeMessage hOM
+          :continueResponseWriteListener listener)
+        (cond closeAfterWrite (.addListener future ChannelFutureListener/CLOSE)
+              hOM ::decoder-returns))) ; FIXME annoying translating to functional flow control
+    ; NB adapting from MessageAggregator decode which is called by same class' channelRead
+    ; which releases the message but that might be right my way
+    ; `out` in decode seems to be the messages it passes through to the next handler, presumably plus the messages it has aggregated
+
+
+    (put bc :chunks msg))
   (offer [msg so-far bc]
     (if so-far
       [::not-first]
@@ -379,7 +406,8 @@
                     [::release-fail]))))))))
 
   HttpContent
-  (channelRead0 [msg bc] (put bc :chunks msg))
+  (channelRead0 [msg bc]
+    (put bc :chunks msg))
   (offer [msg so-far bc]
     (if-not so-far
       [::first-missing]

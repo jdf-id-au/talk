@@ -7,7 +7,8 @@
            (io.netty.channel.socket SocketChannel)
            (io.netty.handler.codec.http HttpServerCodec)
            (io.netty.handler.stream ChunkedWriteHandler)
-           (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler)
+           (io.netty.handler.codec.http.websocketx
+             WebSocketServerProtocolHandler WebSocketServerProtocolHandler$HandshakeComplete)
            (io.netty.util ReferenceCountUtil)
            (io.netty.channel.group ChannelGroup)
            (java.net InetSocketAddress)
@@ -30,7 +31,7 @@
     (try (.add channel-group ch)
          (async/sub out-pub id out-sub)
          (swap! clients assoc id
-            :type :http ; changed in ws userEventTriggered
+            :type :http ; changed in userEventTriggered
             :out-sub out-sub
             :addr (-> ch ^InetSocketAddress .remoteAddress .getAddress .toString))
          (when-not (put! in {:ch id :type :talk.api/connection :connected true})
@@ -46,7 +47,8 @@
            (throw e)))))
 
 (defprotocol ChannelInboundMessageHandler
-  "Naming convention adapted from `SimpleChannelInboundHandler`."
+  "Dispatch incoming netty msg types.
+   Naming convention adapted from `SimpleChannelInboundHandler`."
   (channelRead0 [msg broader-context]
     "Handle specific netty message type.")
   (offer [msg so-far broader-context]
@@ -91,23 +93,21 @@
   "Track netty channels and clients.
    Pass netty messages to handlers.
    Also pass a chan which can be used for aggregation of messages on each netty channel."
-  [opts]
+  [{:keys [clients in ws-send] :as opts}]
   (let [chunks (chan)
-        messages (chan)
-        _ (aggregator chunks messages) ; TODO make use of return channel value?
-        ; TODO assess resource usage from two chans per channel; probably light enough?
-        opts (assoc opts :chunks chunks :messages messages)]
-    (reify ChannelInboundHandler
-      ; TODO ^nil, ^void, or no hint?
+        _ (aggregator chunks in) ; TODO make use of return channel value?
+        opts (assoc opts :chunks chunks)]
+    (reify ChannelInboundHandler ; TODO return hint ^nil, ^void or nothing?
       (channelRegistered [_ ^ChannelHandlerContext ctx] (.fireChannelRegistered ctx))
       (channelUnregistered [_ ^ChannelHandlerContext ctx] (.fireChannelUnregistered ctx))
       (channelActive [_ ^ChannelHandlerContext ctx]
-        ; Facilitate backpressure on subsequent reads.
-        ; Requires manual `(.read ctx)` to indicate readiness.
-        (-> ctx .channel .config (-> (.setAutoRead false)
-        ; May be needed for response from outside netty event loop:
-        ; https://stackoverflow.com/a/48128514/780743
-                                     (.setOption ChannelOption/ALLOW_HALF_CLOSURE true)))
+        (-> ctx .channel .config
+              ; Facilitate backpressure on subsequent reads (both http and after ws upgrade).
+              ; Requires manual `(.read ctx)` to indicate readiness.
+          (-> (.setAutoRead false)
+              ; May be needed for response from outside netty event loop:
+              ; https://stackoverflow.com/a/48128514/780743
+              (.setOption ChannelOption/ALLOW_HALF_CLOSURE true)))
         (track-channel ctx opts)
         (.read ctx))
       (channelInactive [_ ^ChannelHandlerContext ctx] (.fireChannelInactive ctx))
@@ -118,14 +118,23 @@
                    (vreset! release? false)
                    (.fireChannelRead ctx msg))
                  (finally (when @release? (ReferenceCountUtil/release msg)))))
-        (try (channelRead0 msg (assoc opts :ctx ctx))
+        (try (channelRead0 msg (assoc opts :ctx ctx :state (atom {})))
+          ; channelRead0 needs to release msg when done! (done below if Exception)
           (catch Exception e (ReferenceCountUtil/release msg) (throw e)))
-          ; channelRead0 needs to release msg when done!
         nil)
       (channelReadComplete [_ ^ChannelHandlerContext ctx] (.fireChannelReadComplete ctx))
-      (userEventTriggered [_ ^ChannelHandlerContext ctx evt] (.fireUserEventTriggered ctx evt))
-      (channelWritabilityChanged [_ ^ChannelHandlerContext ctx] (.fireChannelWritabilityChanged ctx))
-      (exceptionCaught [_ ^ChannelHandlerContext ctx ^Throwable cause] (.fireExceptionCaught ctx cause)))))
+      (userEventTriggered [_ ^ChannelHandlerContext ctx evt]
+        (if (instance? WebSocketServerProtocolHandler$HandshakeComplete evt)
+          (let [ch (.channel ctx) id (.id ch)
+                out-sub (get-in @clients [id :out-sub])]
+            (swap! clients update id assoc :type :ws)
+            ; first take!, see ws/send! for subsequent
+            (async/take! out-sub (partial ws-send ctx out-sub)))
+          (.fireUserEventTriggered ctx evt)))
+      (channelWritabilityChanged [_ ^ChannelHandlerContext ctx]
+        (.fireChannelWritabilityChanged ctx))
+      (exceptionCaught [_ ^ChannelHandlerContext ctx ^Throwable cause]
+        (.fireExceptionCaught ctx cause)))))
       ; ChannelHandler methods
       ;(handlerAdded [_ ^ChannelHandlerContext ctx])
       ;(handlerRemoved [_ ^ChannelHandlerContext ctx])))
@@ -141,15 +150,13 @@
         ; less network but more memory
         #_(.addLast "http-compr" (HttpContentCompressor.))
         #_(.addLast "http-decompr" (HttpContentDecompressor.))
-        ; inbound only https://stackoverflow.com/a/38947978/780743
 
+        ; inbound only https://stackoverflow.com/a/38947978/780743
         ; TODO replace with functionality in main handler
         #_(.addLast "http-agg" (HttpObjectAggregator. max-content-length))
-        ; FIXME obviously DDOS risk so conditionally add to pipeline once auth'd?
-        #_(.addLast "http-disk-agg" (DiskHttpObjectAggregator. max-content-length))
 
         (.addLast "streamer" (ChunkedWriteHandler.))
-        #_ (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions below
+        #_ (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions
         (.addLast "ws" (WebSocketServerProtocolHandler.
                          ; TODO [application] could specify subprotocol?
                          ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
@@ -157,9 +164,6 @@
 
         ; TODO replace with functionality in main handler
         #_(.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
-        ; FIXME debug design/ref counting
-        #_(.addLast "ws-disk-agg" (DiskWebSocketFrameAggregator. max-message-size))
-
         ; These handlers are functions returning proxy or reify, i.e. new instance per channel:
         ; (See `ChannelHandler` doc regarding state.)
         ;(.addLast "ws-handler" (ws/handler (assoc admin :type :ws)))
