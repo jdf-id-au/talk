@@ -10,9 +10,7 @@
            (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler)
            (io.netty.util ReferenceCountUtil)
            (io.netty.channel.group ChannelGroup)
-           (java.net InetSocketAddress)
-           (talk.server Aggregatable)
-           (io.netty.handler.codec MessageAggregator)))
+           (java.net InetSocketAddress)))
 
 (defn track-channel
   "Register channel in `clients` map and report on `in` chan.
@@ -48,22 +46,22 @@
 (defprotocol ChannelInboundMessageHandler
   "Naming convention adapted from `SimpleChannelInboundHandler`."
   (channelRead0 [msg broader-context]
-    "Handle specific netty message type.
-     broader-context is map containing netty context and other vals.")
-  ; TODO implement; could split out into separate protocol but overkill for the moment
-  (offer [msg so-far broader-context] "Ask for msg to be aggregated into so-far. Report [status result broader-context]."))
+    "Handle specific netty message type.")
+  (offer [msg so-far broader-context]
+    "Ask for msg to be aggregated into so-far. Return [status result broader-context]."))
+
+; "Don't extend in lib if don't own both protocol and target type."
+;(extend-protocol ChannelInboundMessageHandler
+;  ; See talk.http and talk.ws. Anything else isn't handled so send to next handler in pipeline.
+;  Object
+;  (channelRead0 [_ _] false)
+;  (offer [_ _ _])
+;  nil
+;  (channelRead0 [_ _]) ; i.e. nil
+;  (offer [_ _ _]))
 
 (defprotocol Aggregator
-  (accept [so-far msg broader-context] "Attempt to aggregate msg into so-far."))
-
-(extend-protocol ChannelInboundMessageHandler
-  ; See talk.http and talk.ws. Anything else isn't handled so send to next handler in pipeline.
-  Object
-  (channelRead0 [_ _] false)
-  (offer [_ _ _])
-  nil
-  (channelRead0 [_ _]) ; i.e. nil
-  (offer [_ _ _]))
+  (accept [so-far msg broader-context] "Attempt to aggregate processed msg into so-far."))
 
 (defn aggregator
   "Aggregate from chunks chan into messages chan."
@@ -72,7 +70,7 @@
             so-far nil] ; TODO profile; contemplate transient/volatile/...?
     (if msg
       (let [[status result] (offer msg so-far bc)]
-        (case status
+        (case (-> status name keyword) ; un-namespace the status keyword
           (:start :ok) (recur (<! chunks) result)
           (:finish) (if (>! messages result) (recur (<! chunks) nil)
                       (log/info "messages chan closed, dropping" result))
@@ -123,15 +121,7 @@
 
 (defn pipeline
   [^String ws-path
-   {:keys [^long max-content-length ; max HTTP upload
-           ^int handshake-timeout
-           ^int max-frame-size
-           ^long max-message-size] ; max WS message
-    :or {max-content-length (* 1024 1024)
-         handshake-timeout (* 5 1000)
-         max-frame-size (* 64 1024)
-         max-message-size (* 1024 1024)}
-    :as opts}]
+   {:keys [^int handshake-timeout ^int max-frame-size] :as opts}]
   (proxy [ChannelInitializer] []
     (initChannel [^SocketChannel ch]
       (doto (.pipeline ch)

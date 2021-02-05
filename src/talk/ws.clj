@@ -3,14 +3,14 @@
    Send ws messages asynchronously from `out-sub`."
   (:require [clojure.tools.logging :as log]
             [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close!]]
-            [clojure.spec.alpha :as s])
+            [clojure.spec.alpha :as s]
+            [talk.server :as server :refer [ChannelInboundMessageHandler Aggregator accept]])
   (:import (io.netty.channel ChannelHandlerContext
                              SimpleChannelInboundHandler ChannelFutureListener ChannelHandler)
            (io.netty.handler.codec.http.websocketx
              TextWebSocketFrame CorruptedWebSocketFrameException WebSocketFrame
              WebSocketServerProtocolHandler$HandshakeComplete BinaryWebSocketFrame ContinuationWebSocketFrame)
-           (io.netty.handler.codec TooLongFrameException)
-           (talk.server ChannelInboundMessageHandler)))
+           (io.netty.handler.codec TooLongFrameException)))
 
 (s/def :plain/text string?)
 (s/def :plain/data bytes?)
@@ -93,13 +93,23 @@
         (do (log/error "Error in websocket handler" cause)
             (.close ctx))))))
 
+(defrecord Disk [meta file stream]
+  Aggregator
+  (accept [this msg bc]))
+
+(defrecord Memory [meta content]
+  Aggregator
+  (accept [this msg bc]))
+
 (extend-protocol ChannelInboundMessageHandler
   TextWebSocketFrame
   (channelRead0 [msg bc])
   (offer [msg so-far bc] (if so-far [:not-first] msg))
+
   BinaryWebSocketFrame
   (channelRead0 [msg bc])
   (offer [msg so-far bc] (if so-far [:not-first] msg))
+
   ContinuationWebSocketFrame
   (channelRead0 [msg bc])
   (offer [msg so-far bc]))

@@ -6,7 +6,10 @@
                                                   put! close! alt! alt!!]]
             [clojure.string :as str]
             [clojure.spec.alpha :as s]
-            [clojure.spec.gen.alpha :as gen])
+            [clojure.spec.gen.alpha :as gen]
+            [talk.server :as server :refer [Aggregator ChannelInboundMessageHandler
+                                            accept]]
+            [clojure.java.io :as io])
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
                              ChannelHandlerContext ChannelFutureListener ChannelOption
@@ -16,8 +19,9 @@
                                         HttpResponseStatus
                                         FullHttpRequest FullHttpResponse
                                         HttpHeaderNames QueryStringDecoder HttpMethod HttpResponse
-                                        DiskHttpObjectAggregator$AggregatedFullHttpRequest HttpRequest HttpContent LastHttpContent)
-           (io.netty.util CharsetUtil)
+                                        DiskHttpObjectAggregator$AggregatedFullHttpRequest
+                                        HttpRequest HttpContent LastHttpContent)
+           (io.netty.util CharsetUtil ReferenceCountUtil)
            (io.netty.handler.codec.http.cookie ServerCookieDecoder ServerCookieEncoder Cookie)
            (io.netty.handler.codec.http.multipart HttpPostRequestDecoder
                                                   InterfaceHttpData
@@ -27,8 +31,7 @@
                                                   MixedFileUpload MixedAttribute)
            (java.io File RandomAccessFile)
            (java.net URLConnection)
-           (io.netty.handler.codec MixedData)
-           (talk.server ChannelInboundMessageHandler Aggregator)))
+           (io.netty.handler.codec MixedData)))
 
 ; Bit redundant to spec incoming because Netty will have done some sanity checking.
 ; Still, good for clarity/gen/testing.
@@ -191,7 +194,7 @@
                                    ; May be needed for response from outside netty event loop:
                                    ; https://stackoverflow.com/a/48128514/780743
                                    (.setOption ChannelOption/ALLOW_HALF_CLOSURE true)))
-      (track-channel ctx admin)
+      (server/track-channel ctx admin)
       (.read ctx)) ; first read
     (channelRead0 [^ChannelHandlerContext ctx ^FullHttpRequest req]
       (if (-> req .decoderResult .isSuccess)
@@ -318,8 +321,8 @@
                       (if-let [old (get hs lck)]
                         (if (vector? old)
                           (conj old v)
-                          [old v]
-                         (assoc hs lck v))))))))
+                          [old v])
+                        (assoc hs lck v)))))))
             {}))]
     {:ch (-> ctx .channel .id)
      :type ::request ; TODO needed?
@@ -340,13 +343,26 @@
       (log/error "Dropped incoming http message because" port-kw "channel is closed." msg)))
   ; TODO throw something?
 
-(defrecord Memory [content]
-  Aggregator
-  (accept [this msg]))
 
-(defrecord Disk [file]
+(defrecord Disk [meta file stream]
   Aggregator
-  (accept [this msg]))
+  (accept [this msg bc]))
+
+(defrecord Memory [meta content]
+  Aggregator
+  (accept [this msg bc]))
+
+; "Don't extend in lib if don't own both protocol and target type."
+;(extend-type nil
+;  Aggregator
+;  (accept [this msg bc]
+;    (if (some->> bc ::content-length (> (:size-threshold bc)))
+;      (->Memory (atom msg)))))
+
+(defn from-scratch [this msg bc]
+  (if (some->> bc ::content-length (> (:size-threshold bc)))
+    (->Memory (atom msg))))
+    ;(->Disk (io/writer) msg)))
 
 (extend-protocol ChannelInboundMessageHandler
   ; Interface graph:
@@ -355,28 +371,39 @@
   ;          |-> FullHttpMessage
   ;   HttpMessage  |-> FullHttpRequest
   ;     -> HttpRequest
+
   FullHttpRequest
   ; TODO confirm that (hopefully) this is "more specific" than LastHttpContent
   ; and so can be used to identify non-chunked messages.
   (channelRead0 [msg bc] (put bc :messages msg))
   (offer [_ _ _])
+
   HttpRequest
   (channelRead0 [msg bc] (put bc :chunks msg))
   (offer [msg so-far bc]
     (if so-far
-      [:not-first]
+      [::not-first]
       (if-not (-> msg .decoderResult .isSuccess)
-        [:decoder-fail msg]
-        (let [parsed (parse-req bc msg)]
-          [:start (->Memory (atom))]))))
+        [::decoder-fail msg]
+        (let [length (and (HttpUtil/isContentLengthSet msg) (HttpUtil/getContentLength msg))]
+          (if (> length (:max-content-length bc))
+            [::too-long]
+            (let [{:keys [method] :as parsed} (parse-req bc msg)]
+              (case method
+                :post nil ; TODO delegate aggregation to HttpPostRequestDecoder somehow
+                (if (ReferenceCountUtil/release msg)
+                    [::start (from-scratch so-far (assoc parsed ::content-length length) bc)]
+                    [::release-failed]))))))))
 
   HttpContent
   (channelRead0 [msg bc] (put bc :chunks msg))
-  (offer [msg so-far bc])
-    ; TODO probably do need to deal with nil so-far
+  (offer [msg so-far bc]
+    (if-not so-far
+      [::first-missing]
+      [::ok (accept so-far msg bc)]))
+
   LastHttpContent
   (channelRead0 [msg bc] (put bc :chunks msg))
   (offer [msg so-far bc]
     ; TODO deal with nil so-far?
     [:last]))
-

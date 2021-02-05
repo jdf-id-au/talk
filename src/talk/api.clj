@@ -20,7 +20,7 @@
 (s/def ::ch (s/with-gen #(instance? ChannelId %)
               #(gen/fmap (fn [_] (DefaultChannelId/newInstance)) (s/gen nil?))))
 (s/def ::connected boolean?)
-(s/def ::connection (s/keys [:req-un [::ch ::connected]]))
+(s/def ::connection (s/keys :req-un [::ch ::connected]))
 
 (defmulti message-type :type)
 (defmethod message-type ::connection [_] ::connection) ; spec actually in talk.common
@@ -38,6 +38,18 @@
 #_ (s/exercise ::http/request) ; can't gen ::incoming, maybe because :type not specced
 #_ (s/exercise ::outgoing)
 
+(def defaults
+  "Starts as `opts` and eventually becomes `broader-context`. May have netty context at :ctx."
+  ; TODO spec opts (and follow through!) probably need real config system
+  {; Toplevel
+   :ws-path "/ws" :in-buffer 1 :out-buffer 1
+   ; Aggregation
+   :size-threshold (* 16 1024)
+   ; WebSocket
+   :handshake-timeout (* 5 1000) :max-frame-size (* 64 1024) :max-message-size (* 1024 1024)
+   ; HTTP
+   :max-content-length (* 1 1024 1024)})
+
 (defn server!
   "Bootstrap a Netty server connected to core.async channels:
     `in` - from which application takes incoming messages (could pub with reference to @clients :type)
@@ -49,10 +61,9 @@
    Websocket path defaults to /ws. Doesn't support Server Sent Events or long polling at present."
   ; TODO adjust messages to be suitable for spec conformation (see above)
   ([port] (server! port {}))
-  ([port {:keys [ws-path in-buffer out-buffer]
-          :or {ws-path "/ws" in-buffer 1 out-buffer 1}
-          :as opts}]
-   (let [; TODO look at aleph for epoll, thread number specification
+  ([port opts]
+   (let [{:keys [ws-path in-buffer out-buffer] :as opts} (merge defaults opts)
+         ; TODO look at aleph for epoll, thread number specification
          loop-group (NioEventLoopGroup.)
          ; single threaded executor is for group actions
          channel-group (DefaultChannelGroup. GlobalEventExecutor/INSTANCE)
