@@ -96,10 +96,10 @@
 (extend-protocol ChannelInboundMessageHandler
   TextWebSocketFrame
   (channelRead0 [msg bc])
-  (offer [msg so-far] (if so-far [:not-first] msg))
+  (offer [msg so-far bc] (if so-far [:not-first] msg))
   BinaryWebSocketFrame
   (channelRead0 [msg bc])
-  (offer [msg so-far] (if so-far [:not-first] msg))
+  (offer [msg so-far bc] (if so-far [:not-first] msg))
   ContinuationWebSocketFrame
   (channelRead0 [msg bc])
-  (offer [msg so-far]))
+  (offer [msg so-far bc]))

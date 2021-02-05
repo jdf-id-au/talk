@@ -297,8 +297,46 @@
       (log/error "Error in http handler" cause)
       (.close ctx))))
 
+(defn parse-req
+  [{:keys [ctx] :as bc} ^HttpRequest req]
+  (let [qsd (-> req .uri QueryStringDecoder.)
+        {:keys [headers cookies]}
+        (some->> req .headers .iteratorAsString iterator-seq
+          (reduce
+            ; Are repeated headers already coalesced by netty?
+            ; Does it handle keys case-sensitively?
+            (fn [m [k v]]
+              (let [lck (-> k str/lower-case keyword)]
+                (case lck
+                  :cookie ; TODO omit if empty
+                  (update m :cookies into
+                    (for [^Cookie c (.decode ServerCookieDecoder/STRICT v)]
+                      ; TODO could look up max-age, etc...
+                      [(.name c) (.value c)]))
+                  (update m :headers
+                    (fn [hs]
+                      (if-let [old (get hs lck)]
+                        (if (vector? old)
+                          (conj old v)
+                          [old v]
+                         (assoc hs lck v))))))))
+            {}))]
+    {:ch (-> ctx .channel .id)
+     :type ::request ; TODO needed?
+     :method (-> req .method .toString str/lower-case keyword)
+     :path (.path qsd)
+     :query (.parameters qsd)
+     :protocol (-> req .protocolVersion .toString)
+     :headers headers
+     :cookies cookies
+     :keep-alive? (HttpUtil/isKeepAlive req)}))
+    ; not accommodating body for GET, DELETE, TRACE, OPTIONS or HEAD
+    ; (not data) (assoc :content (some-> req .content (.toString (HttpUtil/getCharset req))))))
+
 (defn put [bc port-kw msg]
-  (or (put! (get bc port-kw) msg #(when % (.read (:ctx bc))))
+  (or (put! (get bc port-kw)
+            (case port-kw :chunks [bc msg] :messages msg)
+            #(when % (.read (:ctx bc))))
       (log/error "Dropped incoming http message because" port-kw "channel is closed." msg)))
   ; TODO throw something?
 
@@ -321,23 +359,24 @@
   ; TODO confirm that (hopefully) this is "more specific" than LastHttpContent
   ; and so can be used to identify non-chunked messages.
   (channelRead0 [msg bc] (put bc :messages msg))
-  (offer [_ _])
+  (offer [_ _ _])
   HttpRequest
   (channelRead0 [msg bc] (put bc :chunks msg))
-  (offer [msg so-far]
+  (offer [msg so-far bc]
     (if so-far
       [:not-first]
       (if-not (-> msg .decoderResult .isSuccess)
-        [:decoder-fail]
-        [:start (->Memory (atom))])))
+        [:decoder-fail msg]
+        (let [parsed (parse-req bc msg)]
+          [:start (->Memory (atom))]))))
 
   HttpContent
   (channelRead0 [msg bc] (put bc :chunks msg))
-  (offer [msg so-far])
+  (offer [msg so-far bc])
     ; TODO probably do need to deal with nil so-far
   LastHttpContent
   (channelRead0 [msg bc] (put bc :chunks msg))
-  (offer [msg so-far]
+  (offer [msg so-far bc]
     ; TODO deal with nil so-far?
     [:last]))
 
