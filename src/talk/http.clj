@@ -175,7 +175,8 @@
   (let [^ChannelHandlerContext ctx (:ctx @state)
         {:keys [keep-alive?]} meta
         id (-> ctx .channel .id)
-        out-sub (get-in @clients [id :out-sub])]
+        out-sub (get-in @clients [id :out-sub])
+        protocol (HttpVersion/valueOf protocol)]
     (go
       (if (>! in req)
         (try
@@ -197,9 +198,10 @@
                            string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
                            nil? Unpooled/EMPTY_BUFFER
                            bytes? (Unpooled/copiedBuffer ^bytes content))
-                      res (DefaultFullHttpResponse. protocol
+                      res (DefaultFullHttpResponse. ; needed protocol hinted to resolve!
+                            protocol
                             (HttpResponseStatus/valueOf status)
-                            buf) ; no matching ctor at runtime plus Cursive unhappy
+                            ^ByteBuf buf)
                       hdrs (.headers res)]
                   (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
                   ; TODO need to support repeated headers (other than Set-Cookie ?)
@@ -208,12 +210,12 @@
                   (respond! ctx keep-alive? res)))
               (.read ctx)) ; because autoRead is false
             (do (log/error "Dropped incoming http request because of out chan timeout")
-                (code! ctx HttpResponseStatus/SERVICE_UNAVAILABLE)))
+                (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE)))
           (catch Exception e
             (log/error "Error in http response handler" e)
-            (code! ctx HttpResponseStatus/INTERNAL_SERVER_ERROR)))
+            (code! ctx protocol HttpResponseStatus/INTERNAL_SERVER_ERROR)))
         (do (log/error "Dropped incoming http request because in chan is closed")
-            (code! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))))))
+            (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE))))))
 
 (defn read-chunkwise [{:keys [state in] :as opts}]
   ; TODO work out how to indicate logged errors is while loop to user. Throw and catch? Cleanup?
