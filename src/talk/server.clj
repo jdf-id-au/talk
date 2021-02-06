@@ -17,37 +17,6 @@
            (java.nio.file Path Files StandardOpenOption)
            (java.nio.channels SeekableByteChannel)))
 
-(defn track-channel
-  "Register channel in `clients` map and report on `in` chan.
-   Map entry is a map containing `type`, `out-sub` and `addr`, and can be updated.
-
-   Usage:
-   - Call from channelActive.
-   - Detect websocket upgrade handshake, using userEventTriggered, and update `clients` map."
-  [^ChannelHandlerContext ctx
-   {:keys [^ChannelGroup channel-group clients in out-pub]}]
-  (let [ch (.channel ctx)
-        id (.id ch)
-        cf (.closeFuture ch)
-        out-sub (chan)]
-    (try (.add channel-group ch)
-         (async/sub out-pub id out-sub)
-         (swap! clients assoc id
-            :type :http ; changed in userEventTriggered
-            :out-sub out-sub
-            :addr (-> ch ^InetSocketAddress .remoteAddress .getAddress .toString))
-         (when-not (put! in {:ch id :type :talk.api/connection :connected true})
-           (log/error "Unable to report connection because in chan is closed"))
-         (.addListener cf
-           (reify ChannelFutureListener
-             (operationComplete [_ _]
-               (swap! clients dissoc id)
-               (when-not (put! in {:ch id :type :talk.api/connection :connected false})
-                 (log/error "Unable to report disconnection because in chan is closed")))))
-         (catch Exception e
-           (log/error "Unable to register channel" ch e)
-           (throw e)))))
-
 #_(defprotocol ChannelInboundMessageHandler
     "Dispatch incoming netty msg types.
    Naming convention adapted from `SimpleChannelInboundHandler`."
@@ -120,7 +89,7 @@
                      (vreset! release? false)
                      (.fireChannelRead ctx msg))
                    (finally (when @release? (ReferenceCountUtil/release msg)))))
-          (try (channelRead0 msg (assoc opts :ctx ctx :state (atom {})))
+          (try (channelRead0 msg (assoc opts :ctx ctx :state (atom {}))) ; fixme should be in channelActive
             ; channelRead0 needs to release msg when done! (done below if Exception)
             (catch Exception e (ReferenceCountUtil/release msg) (throw e)))
           nil)
@@ -146,28 +115,30 @@
    {:keys [^int handshake-timeout ^int max-frame-size] :as opts}]
   (proxy [ChannelInitializer] []
     (initChannel [^SocketChannel ch]
-      (doto (.pipeline ch)
-        ; TODO could add handlers selectively according to need (from within the channel)
-        (.addLast "http" (HttpServerCodec.)) ; TODO could tune chunk size
-        ; less network but more memory
-        #_(.addLast "http-compr" (HttpContentCompressor.))
-        #_(.addLast "http-decompr" (HttpContentDecompressor.))
+      ; add state atom instead of using netty's Channel.attr
+      (let [channel-opts (assoc opts :state (atom {}))]
+        (doto (.pipeline ch)
+          ; TODO could add handlers selectively according to need (from within the channel)
+          (.addLast "http" (HttpServerCodec.)) ; TODO could tune chunk size
+          ; less network but more memory
+          #_(.addLast "http-compr" (HttpContentCompressor.))
+          #_(.addLast "http-decompr" (HttpContentDecompressor.))
 
-        ; inbound only https://stackoverflow.com/a/38947978/780743
-        ; TODO replace with functionality in main handler
-        #_(.addLast "http-agg" (HttpObjectAggregator. max-content-length))
+          ; inbound only https://stackoverflow.com/a/38947978/780743
+          ; TODO replace with functionality in main handler
+          #_(.addLast "http-agg" (HttpObjectAggregator. max-content-length))
 
-        (.addLast "streamer" (ChunkedWriteHandler.))
-        #_ (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions
-        (.addLast "ws" (WebSocketServerProtocolHandler.
-                         ; TODO [application] could specify subprotocol?
-                         ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
-                         ws-path nil true max-frame-size handshake-timeout))
+          (.addLast "streamer" (ChunkedWriteHandler.))
+          #_ (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions
+          (.addLast "ws" (WebSocketServerProtocolHandler.
+                           ; TODO [application] could specify subprotocol?
+                           ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
+                           ws-path nil true max-frame-size handshake-timeout))
 
-        ; TODO replace with functionality in main handler
-        #_(.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
-        ; These handlers are functions returning proxy or reify, i.e. new instance per channel:
-        ; (See `ChannelHandler` doc regarding state.)
-        (.addLast "ws-handler" (ws/handler (assoc opts :type :ws)))
-        (.addLast "http-handler" (http/handler (assoc opts :type :http)))
-        #_(.addLast "handler" (aggregate-and-handle opts))))))
+          ; TODO replace with functionality in main handler
+          #_(.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
+          ; These handlers are functions returning proxy or reify, i.e. new instance per channel:
+          ; (See `ChannelHandler` doc regarding state.)
+          (.addLast "ws-handler" (ws/handler channel-opts))
+          (.addLast "http-handler" (http/handler channel-opts))
+          #_(.addLast "handler" (aggregate-and-handle opts)))))))

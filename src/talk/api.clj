@@ -39,11 +39,12 @@
 #_ (s/exercise ::outgoing)
 
 (def defaults
-  "Starts as `opts` and eventually becomes `broader-context` aka `bc`.
-   Reified channelRead in handler adds netty context at :ctx."
+  "Starts as `opts` and eventually becomes `channel-opts`.
+   A state map atom `:state` is added in channel-specific initialiser's initChannel.
+   State will include a reference to Netty's ChannelHandlerContext `:ctx`, added in channel-specific handler's channelActive."
   ; TODO spec opts (and follow through!) probably need real config system
   {; Toplevel
-   :ws-path "/ws" :in-buffer 1 :out-buffer 1
+   :ws-path "/ws" :in-buffer 1 :out-buffer 1 :handler-timeout (* 5 1000)
    ; Aggregation
    :size-threshold (* 16 1024)
    ; WebSocket
@@ -82,12 +83,13 @@
                             (.channel NioServerSocketChannel)
                             (.localAddress ^int (InetSocketAddress. port))
                             (.childHandler (server/pipeline ws-path
-                                             (merge opts
-                                               {:channel-group channel-group
-                                                :clients clients
-                                                :in in :out-pub out-pub
-                                                ; avoid dep cycle
-                                                :ws-send ws/send!}))))
+                                             (assoc opts
+                                               :channel-group channel-group
+                                               :clients clients
+                                               :in in
+                                               :out-pub out-pub))))
+                                               ; avoid dep cycle
+                                               ;:ws-send ws/send!))))
                 ; I think sync here causes binding to fail here rather than later
                 server-cf (-> bootstrap .bind .sync)]
             {:close (fn [] (close! out)

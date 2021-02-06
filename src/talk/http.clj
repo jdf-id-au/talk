@@ -19,7 +19,7 @@
                                         HttpResponseStatus
                                         FullHttpRequest FullHttpResponse
                                         HttpHeaderNames QueryStringDecoder HttpMethod HttpResponse
-                                        HttpRequest HttpContent LastHttpContent)
+                                        HttpRequest HttpContent LastHttpContent HttpObject HttpVersion)
            (io.netty.util CharsetUtil ReferenceCountUtil)
            (io.netty.handler.codec.http.cookie ServerCookieDecoder ServerCookieEncoder Cookie)
            (io.netty.handler.codec.http.multipart HttpPostRequestDecoder
@@ -29,7 +29,8 @@
                                                   DiskFileUpload DiskAttribute
                                                   MixedFileUpload MixedAttribute)
            (java.io File RandomAccessFile)
-           (java.net URLConnection)))
+           (java.net URLConnection InetSocketAddress)
+           (io.netty.channel.group ChannelGroup)))
 
 ; Bit redundant to spec incoming because Netty will have done some sanity checking.
 ; Still, good for clarity/gen/testing.
@@ -80,6 +81,38 @@
 (s/def ::response (s/keys :req-un [::status]
                           :opt-un [::headers ::cookies ::content]))
 
+(defn track-channel
+  "Register channel in `clients` map and report on `in` chan.
+   Map entry is a map containing `type`, `out-sub` and `addr`, and can be updated.
+
+   Usage:
+   - Call from channelActive.
+   - Detect websocket upgrade handshake, using userEventTriggered, and update `clients` map."
+  [{:keys [^ChannelGroup channel-group
+           state clients in out-pub]}]
+  (let [ctx ^ChannelHandlerContext (:ctx @state)
+        ch (.channel ctx)
+        id (.id ch)
+        cf (.closeFuture ch)
+        out-sub (chan)]
+    (try (.add channel-group ch)
+         (async/sub out-pub id out-sub)
+         (swap! clients assoc id
+           :type :http ; changed in userEventTriggered
+           :out-sub out-sub
+           :addr (-> ch ^InetSocketAddress .remoteAddress .getAddress .toString))
+         (when-not (put! in {:ch id :type :talk.api/connection :connected true})
+           (log/error "Unable to report connection because in chan is closed"))
+         (.addListener cf
+           (reify ChannelFutureListener
+             (operationComplete [_ _]
+               (swap! clients dissoc id)
+               (when-not (put! in {:ch id :type :talk.api/connection :connected false})
+                 (log/error "Unable to report disconnection because in chan is closed")))))
+         (catch Exception e
+           (log/error "Unable to register channel" ch e)
+           (throw e)))))
+
 ; after https://netty.io/4.1/xref/io/netty/example/http/websocketx/server/WebSocketIndexPageHandler.html
 (defn respond!
   "Send HTTP response, and manage keep-alive and Content-Length."
@@ -117,6 +150,65 @@
     (let [cf (.writeAndFlush ctx region)] ; encoded into several HttpContents?
       (when-not keep-alive? (.addListener cf ChannelFutureListener/CLOSE)))))
 
+(defn responder [{:keys [in clients handler-timeout state] :as opts}
+                 ^HttpVersion protocol-version keep-alive?
+                 request-map cleanup]
+  (let [^ChannelHandlerContext ctx (:ctx @state)
+        id (-> ctx .channel .id)
+        out-sub (get-in @clients [id :out-sub])]
+    (go
+      (if (>! in request-map)
+        (try
+          (if-let [{:keys [status headers cookies content]}
+                   (alt! out-sub ([v] v) (async/timeout handler-timeout) nil)]
+            (do
+              (if (instance? File content) ; TODO add support for other streaming sources
+                ; Streaming:
+                (let [res (DefaultHttpResponse.
+                            protocol-version
+                            (HttpResponseStatus/valueOf status))
+                      hdrs (.headers res)]
+                  (doseq [[k v] headers] (.set hdrs (name k) v))
+                  (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
+                    (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
+                  ; TODO trailing headers?
+                  (stream! ctx keep-alive? res content))
+                ; Non-streaming:
+                (let [buf (condp #(%1 %2) content
+                            string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
+                            nil? Unpooled/EMPTY_BUFFER
+                            bytes? (Unpooled/copiedBuffer ^bytes content))
+                      res (DefaultFullHttpResponse.
+                            protocol-version
+                            (HttpResponseStatus/valueOf status)
+                            ^ByteBuf buf)
+                      hdrs (.headers res)]
+                  (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
+                  ; TODO need to support repeated headers (other than Set-Cookie ?)
+                  (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
+                    (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
+                  (respond! ctx keep-alive? res)))
+              (cleanup)
+              (.read ctx)) ; because autoRead is false
+            (do (log/error "Dropped incoming http request because of out chan timeout")
+                (cleanup)
+                (respond! ctx false (DefaultFullHttpResponse.
+                                      protocol-version
+                                      HttpResponseStatus/SERVICE_UNAVAILABLE
+                                      Unpooled/EMPTY_BUFFER))))
+          (catch Exception e
+            (log/error "Error in http response handler" e)
+            (cleanup)
+            (respond! ctx false (DefaultFullHttpResponse.
+                                  protocol-version
+                                  HttpResponseStatus/INTERNAL_SERVER_ERROR
+                                  Unpooled/EMPTY_BUFFER))))
+        (do (log/error "Dropped incoming http request because in chan is closed")
+            (cleanup)
+            (respond! ctx false (DefaultFullHttpResponse.
+                                  protocol-version
+                                  HttpResponseStatus/SERVICE_UNAVAILABLE
+                                  Unpooled/EMPTY_BUFFER)))))))
 (def upload-handler
   "Handle HTTP POST/PUT/PATCH data. Does not apply charset automatically.
    NB data >16kB will be stored in tempfiles, which will be lost on JVM shutdown.
@@ -128,7 +220,6 @@
   ; TODO *** try without HOA (although confirm if supports PUT/PATCH - should? looks at content-type?)
   ; https://github.com/netty/netty/blob/master/example/src/main/java/io/netty/example/http/upload/HttpUploadServerHandler.java
 
-
   ; TODO protect against file upload abuse somehow
   ; (partly protected by max-content-length and backpressure)
   (let [data-factory (DefaultHttpDataFactory.)] ; memory if <16kB, else disk
@@ -136,11 +227,10 @@
     (set! (. DiskFileUpload baseDirectory) nil) ; system temp directory
     (set! (. DiskAttribute deleteOnExitTemporaryFile) true)
     (set! (. DiskAttribute baseDirectory) nil)
-    (fn [^FullHttpRequest req]
+    (fn [^HttpRequest req]
       (condp contains? (.method req)
         #{HttpMethod/POST}
-        ; FIXME might be much easier just to support PUT and PATCH for huge files?
-        (let [decoder (HttpPostRequestDecoder. data-factory req)] ; FIXME adapt to use MixedData
+        (let [decoder (HttpPostRequestDecoder. data-factory req)]
           {:cleanup #(.destroy decoder)
            :data
            (some->>
@@ -168,6 +258,7 @@
                  (log/info "Unsupported http body data type "
                    (assoc base :type (.getHttpDataType d)))))
              seq (into []))})
+        ; FIXME HPDR??
         #{HttpMethod/PUT HttpMethod/PATCH}
         (let [charset (HttpUtil/getCharset req)
               base {:charset (-> charset .toString keyword)}
@@ -183,118 +274,70 @@
 (defn ^ChannelHandler handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
   ; TODO read about HTTP/2 https://developers.google.com/web/fundamentals/performance/http2
-  [{:keys [clients in handler-timeout]
-    :or {handler-timeout (* 5 1000)}
-    :as admin}]
-  (proxy [SimpleChannelInboundHandler] [HttpRequest]
+  [{:keys [clients state] :as opts}]
+  (proxy [SimpleChannelInboundHandler] [HttpObject]
     (channelActive [^ChannelHandlerContext ctx]
-      ; facilitate backpressure on subsequent reads; requires .read see branches below
-      (-> ctx .channel .config (-> (.setAutoRead false)
-                                   ; May be needed for response from outside netty event loop:
-                                   ; https://stackoverflow.com/a/48128514/780743
-                                   (.setOption ChannelOption/ALLOW_HALF_CLOSURE true)))
-      (server/track-channel ctx admin)
+      ; TODO is this safe? Doesn't given channel keep same context instance? Set by pipeline in initChannel?
+      (swap! state assoc :ctx ctx)
+      (track-channel opts)
+      (-> ctx .channel .config
+            ; facilitate backpressure on subsequent reads; requires .read see branches below
+        (-> (.setAutoRead false)
+            ; May be needed for response from outside netty event loop:
+            ; https://stackoverflow.com/a/48128514/780743
+            (.setOption ChannelOption/ALLOW_HALF_CLOSURE true)))
       (.read ctx)) ; first read
-    (channelRead0 [^ChannelHandlerContext ctx ^FullHttpRequest req]
-      (if (-> req .decoderResult .isSuccess)
-        (let [ch (.channel ctx)
-              id (.id ch)
-              out-sub (get-in @clients [id :out-sub])
-              method (.method req)
-              qsd (-> req .uri QueryStringDecoder.)
-              keep-alive? (HttpUtil/isKeepAlive req)
-              protocol-version (.protocolVersion req) ; get info from req before released (necessary?)
-              basics {:ch id :type ::request
-                      :method (-> method .toString str/lower-case keyword)
-                      :path (.path qsd)
-                      :query (.parameters qsd)
-                      :protocol (-> req .protocolVersion .toString)}
-              {:keys [headers cookies]}
-              (some->> req .headers .iteratorAsString iterator-seq
-                (reduce
-                  ; Are repeated headers already coalesced by netty?
-                  ; Does it handle keys case-sensitively?
-                  (fn [m [k v]]
-                    (let [lck (-> k str/lower-case keyword)]
-                      (case lck
-                        :cookie ; TODO omit if empty
-                        (update m :cookies into
-                          (for [^Cookie c (.decode ServerCookieDecoder/STRICT v)]
-                            ; TODO could look at max-age, etc...
-                            [(.name c) (.value c)]))
-                        (update m :headers
-                          (fn [hs]
-                            (if-let [old (get hs lck)]
-                              (if (vector? old)
-                                (conj old v)
-                                [old v])
-                              (assoc hs lck v)))))))
-                  {}))
-              {:keys [data cleanup] :or {cleanup (constantly nil)}} (upload-handler req)
-              request-map
-              (cond-> (assoc basics :headers headers :cookies cookies)
-                data (assoc :data data)
-                ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
-                #_#_(not data) (assoc :content (some-> req .content
-                                                 (.toString (HttpUtil/getCharset req)))))]
-          (go
-            (if (>! in request-map)
-              (try
-                (if-let [{:keys [status headers cookies content]}
-                         (alt! out-sub ([v] v) (async/timeout handler-timeout) nil)]
-                  (do
-                    (if (instance? File content) ; TODO add support for other streaming sources
-                      ; Streaming:
-                      (let [res (DefaultHttpResponse.
-                                  protocol-version
-                                  (HttpResponseStatus/valueOf status))
-                            hdrs (.headers res)]
-                        (doseq [[k v] headers] (.set hdrs (name k) v))
-                        (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
-                          (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
-                        ; TODO trailing headers?
-                        (stream! ctx keep-alive? res content))
-                      ; Non-streaming:
-                      (let [buf (condp #(%1 %2) content
-                                  string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
-                                  nil? Unpooled/EMPTY_BUFFER
-                                  bytes? (Unpooled/copiedBuffer ^bytes content))
-                            res (DefaultFullHttpResponse.
-                                  protocol-version
-                                  (HttpResponseStatus/valueOf status)
-                                  ^ByteBuf buf)
-                            hdrs (.headers res)]
-                        (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
-                        ; TODO need to support repeated headers (other than Set-Cookie ?)
-                        (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
-                          (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
-                        (respond! ctx keep-alive? res)))
-                    (cleanup)
-                    (.read ctx)) ; because autoRead is false
-                  (do (log/error "Dropped incoming http request because of out chan timeout")
-                      (cleanup)
-                      (respond! ctx false (DefaultFullHttpResponse.
-                                            protocol-version
-                                            HttpResponseStatus/SERVICE_UNAVAILABLE
-                                            Unpooled/EMPTY_BUFFER))))
-                (catch Exception e
-                  (log/error "Error in http response handler" e)
-                  (cleanup)
-                  (respond! ctx false (DefaultFullHttpResponse.
-                                        protocol-version
-                                        HttpResponseStatus/INTERNAL_SERVER_ERROR
-                                        Unpooled/EMPTY_BUFFER))))
-              (do (log/error "Dropped incoming http request because in chan is closed")
-                  (cleanup)
-                  (respond! ctx false (DefaultFullHttpResponse.
-                                        protocol-version
-                                        HttpResponseStatus/SERVICE_UNAVAILABLE
-                                        Unpooled/EMPTY_BUFFER))))))
-        (do (log/info "Decoder failure" (-> req .decoderResult .cause))
-            (respond! ctx false (DefaultFullHttpResponse.
-                                  (.protocolVersion req)
-                                  HttpResponseStatus/BAD_REQUEST
-                                  Unpooled/EMPTY_BUFFER)))))
+    (channelInactive [^ChannelHandlerContext ctx])
+      ; TODO decoder.cleanFiles()
+    (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
+      ; Would be nice to dispatch using protocol, but I don't own netty types so "shouldn't in lib code".
+      (when-let [^HttpRequest msg (and (instance? HttpRequest obj) obj)]
+        (if (-> msg .decoderResult .isSuccess)
+          (let [ch (.channel ctx)
+                id (.id ch)
+                method (.method msg)
+                qsd (-> msg .uri QueryStringDecoder.)
+                keep-alive? (HttpUtil/isKeepAlive msg)
+                protocol-version (.protocolVersion msg) ; get info from req before released (necessary?)
+                basics {:ch id :type ::request
+                        :method (-> method .toString str/lower-case keyword)
+                        :path (.path qsd)
+                        :query (.parameters qsd)
+                        :protocol (-> msg .protocolVersion .toString)}
+                {:keys [headers cookies]}
+                (some->> msg .headers .iteratorAsString iterator-seq
+                  (reduce
+                    ; Are repeated headers already coalesced by netty?
+                    ; Does it handle keys case-sensitively?
+                    (fn [m [k v]]
+                      (let [lck (-> k str/lower-case keyword)]
+                        (case lck
+                          :cookie ; TODO omit if empty
+                          (update m :cookies into
+                            (for [^Cookie c (.decode ServerCookieDecoder/STRICT v)]
+                              ; TODO could look at max-age, etc...
+                              [(.name c) (.value c)]))
+                          (update m :headers
+                            (fn [hs]
+                              (if-let [old (get hs lck)]
+                                (if (vector? old)
+                                  (conj old v)
+                                  [old v])
+                                (assoc hs lck v)))))))
+                    {}))
+                {:keys [data cleanup] :or {cleanup (constantly nil)}} (upload-handler msg)
+                request-map
+                (cond-> (assoc basics :headers headers :cookies cookies)
+                  data (assoc :data data)
+                  ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
+                  #_#_(not data) (assoc :content (some-> msg .content
+                                                   (.toString (HttpUtil/getCharset msg)))))]
+            (responder opts protocol-version keep-alive? request-map cleanup))
+          (do (log/info "Decoder failure" (-> msg .decoderResult .cause))
+              (respond! ctx false (DefaultFullHttpResponse.
+                                    (.protocolVersion msg)
+                                    HttpResponseStatus/BAD_REQUEST
+                                    Unpooled/EMPTY_BUFFER))))))
     (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
       (log/error "Error in http handler" cause)
       (.close ctx))))
@@ -357,11 +400,12 @@
 
 #_(extend-protocol ChannelInboundMessageHandler
     ; Interface graph (dispatch on "most specific"):
-    ;   HttpContent
-    ;     -> LastHttpContent
-    ;          |-> FullHttpMessage
-    ;   HttpMessage  |-> FullHttpRequest
-    ;     -> HttpRequest
+    ;   HttpObject
+    ;     -> HttpContent
+    ;          -> LastHttpContent
+    ;               |-> FullHttpMessage
+    ;     -> HttpMessage  |-> FullHttpRequest
+    ;          -> HttpRequest
 
     ; https://clojure.org/reference/protocols
     ; "if one interface is derived from the other, the more derived is used,

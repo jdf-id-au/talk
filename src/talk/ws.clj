@@ -44,7 +44,7 @@
   ; Copying means twice the memory is temporarily needed, until netty bytebuf released.
   ; Limited by needing to fit in (half of available) memory because of WebSocketFrameAggregator.
   ; Benefit is application not needing to worry about manual memory management...
-  [{:keys [in type clients] :as admin}]
+  [{:keys [in clients state] :as opts}]
   (proxy [SimpleChannelInboundHandler] [WebSocketFrame]
     (userEventTriggered [^ChannelHandlerContext ctx evt]
       ; TODO propagate other user events??
@@ -52,7 +52,7 @@
         (let [ch (.channel ctx)
               id (.id ch)
               out-sub (get-in @clients [id :out-sub])]
-          (swap! clients update id assoc :type type)
+          (swap! clients update id assoc :type :ws)
           ; first take!, see send! for subsequent
           (async/take! out-sub (partial send! ctx out-sub)))))
     (channelRead0 [^ChannelHandlerContext ctx ^WebSocketFrame frame]
