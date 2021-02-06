@@ -2,8 +2,8 @@
   (:require [clojure.tools.logging :as log]
             [clojure.core.async :as async :refer [go go-loop chan <!! >!! <! >!
                                                   put! close! alt! alt!!]]
-            [talk.http :as http :refer [Request Attribute File Trail]]
-            [talk.ws :as ws :refer [Text Binary]]
+            [talk.http :as http]
+            [talk.ws :as ws]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen])
   (:import (io.netty.channel ChannelInitializer ChannelHandlerContext
@@ -20,7 +20,9 @@
            (io.netty.channel.group ChannelGroup)
            (java.net InetSocketAddress)
            (io.netty.util ReferenceCountUtil)
-           (talk.http Request Attribute File)))
+           (talk.http Request Attribute File Trail)))
+
+(def on #(.asShortText (:channel %)))
 
 (defrecord Connection [channel open?]
   Object (toString [r] (str "Channel " (on r) \  (if open? "opened" "closed"))))
@@ -32,7 +34,7 @@
               #(gen/fmap (fn [_] (DefaultChannelId/newInstance)) (s/gen nil?))))
 
 (defmulti message-type class)
-(defmethod message-type Connection [_] ::server/connection)
+(defmethod message-type Connection [_] ::Connection)
 (defmethod message-type Request [_] ::http/request)
 (defmethod message-type Attribute [_] ::http/Attribute)
 (defmethod message-type File [_] ::http/File)
@@ -59,13 +61,13 @@
            {:type :http ; changed in userEventTriggered
             :out-sub out-sub
             :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp)})
-         (when-not (put! in (->Connection))
+         (when-not (put! in (->Connection id true))
            (log/error "Unable to report connection because in chan is closed"))
          (.addListener cf
            (reify ChannelFutureListener
              (operationComplete [_ _]
                (swap! clients dissoc id)
-               (when-not (put! in {:ch id :type :talk.api/connection :connected false})
+               (when-not (put! in (->Connection id false))
                  (log/error "Unable to report disconnection because in chan is closed")))))
          (catch Exception e
            (log/error "Unable to register channel" ch e)

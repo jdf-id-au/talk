@@ -32,20 +32,20 @@
 (defn send! [^ChannelHandlerContext ctx out-sub {:keys [text data] :as msg}]
   (if msg
     (let [ch (.channel ctx)
-          id (.id ch)]
-      (some-> (cond text (TextWebSocketFrame. ^String text)
-                    data (BinaryWebSocketFrame. ^bytes data))
-        #(.writeAndFlush ch %)
-        (.addListener
-          (reify ChannelFutureListener
-            (operationComplete [_ f]
-              (when (.isCancelled f)
-                (log/info "Cancelled message" msg "to" id))
-              (when-not (.isSuccess f)
-                (log/error "Send error for" msg "to" id (.cause f)))
-              (log/info "ChannelFutureListener")
-              (async/take! out-sub (partial send! ctx out-sub))))))) ; facilitate backpressure
-    #_(log/info "Out pub-sub closed.")))
+          id (.id ch)
+          fr   (cond text (TextWebSocketFrame. ^String text)
+                   data (BinaryWebSocketFrame. ^bytes data))]
+      (when fr
+        (-> (.writeAndFlush ch fr)
+            (.addListener
+              (reify ChannelFutureListener
+                (operationComplete [_ f]
+                  (when (.isCancelled f)
+                    (log/info "Cancelled message" msg "to" id))
+                  (when-not (.isSuccess f)
+                    (log/error "Send error for" msg "to" id (.cause f)))
+                  (log/info "ChannelFutureListener")
+                  (async/take! out-sub (partial send! ctx out-sub)))))))))) ; facilitate backpressure
 
 (defn ^ChannelHandler handler
   "Forward incoming text messages to `in`.
