@@ -4,7 +4,7 @@
   (:require [clojure.tools.logging :as log]
             [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close!]]
             [clojure.spec.alpha :as s]
-            [talk.server :as server :refer [ChannelInboundMessageHandler Aggregator accept]])
+            #_[talk.server :as server :refer [ChannelInboundMessageHandler Aggregator accept]])
   (:import (io.netty.channel ChannelHandlerContext
                              SimpleChannelInboundHandler ChannelFutureListener ChannelHandler)
            (io.netty.handler.codec.http.websocketx
@@ -93,23 +93,23 @@
         (do (log/error "Error in websocket handler" cause)
             (.close ctx))))))
 
-(defrecord Disk [meta file stream]
-  Aggregator
-  (accept [so-far msg bc]))
+#_(defrecord Disk [meta file stream]
+    Aggregator
+    (accept [so-far msg bc]))
 
-(defrecord Memory [meta content]
-  Aggregator
-  (accept [so-far msg bc]))
+#_(defrecord Memory [meta content]
+    Aggregator
+    (accept [so-far msg bc]))
 
-(extend-protocol ChannelInboundMessageHandler
-  TextWebSocketFrame
-  (channelRead0 [msg bc])
-  (offer [msg so-far bc] (if so-far [:not-first] msg))
+#_(extend-protocol ChannelInboundMessageHandler
+    TextWebSocketFrame
+    (channelRead0 [msg bc])
+    (offer [msg so-far bc] (if so-far [:not-first] msg))
 
-  BinaryWebSocketFrame
-  (channelRead0 [msg bc])
-  (offer [msg so-far bc] (if so-far [:not-first] msg))
+    BinaryWebSocketFrame
+    (channelRead0 [msg bc])
+    (offer [msg so-far bc] (if so-far [:not-first] msg))
 
-  ContinuationWebSocketFrame
-  (channelRead0 [msg bc])
-  (offer [msg so-far bc]))
+    ContinuationWebSocketFrame
+    (channelRead0 [msg bc])
+    (offer [msg so-far bc]))

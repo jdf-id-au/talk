@@ -7,9 +7,9 @@
             [clojure.string :as str]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
-            [talk.util :as util]
-            [talk.server :as server :refer [ChannelInboundMessageHandler offer
-                                            Aggregator accept]])
+            #_[talk.util :as util]
+            #_[talk.server :as server :refer [ChannelInboundMessageHandler offer
+                                              Aggregator accept]])
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
                              ChannelHandlerContext ChannelFutureListener ChannelOption
@@ -121,8 +121,14 @@
   "Handle HTTP POST/PUT/PATCH data. Does not apply charset automatically.
    NB data >16kB will be stored in tempfiles, which will be lost on JVM shutdown.
    Must cleanup after response sent; this will also remove tempfiles."
+
   ; NB limited by needing to fit in memory because of HttpObjectAggregator,
-  ; after https://gist.github.com/breznik/6215834
+  ; after https://gist.github.com/breznik/6215834 (seems like source for netty example below?)
+
+  ; TODO *** try without HOA (although confirm if supports PUT/PATCH - should? looks at content-type?)
+  ; https://github.com/netty/netty/blob/master/example/src/main/java/io/netty/example/http/upload/HttpUploadServerHandler.java
+
+
   ; TODO protect against file upload abuse somehow
   ; (partly protected by max-content-length and backpressure)
   (let [data-factory (DefaultHttpDataFactory.)] ; memory if <16kB, else disk
@@ -180,7 +186,7 @@
   [{:keys [clients in handler-timeout]
     :or {handler-timeout (* 5 1000)}
     :as admin}]
-  (proxy [SimpleChannelInboundHandler] [FullHttpRequest]
+  (proxy [SimpleChannelInboundHandler] [HttpRequest]
     (channelActive [^ChannelHandlerContext ctx]
       ; facilitate backpressure on subsequent reads; requires .read see branches below
       (-> ctx .channel .config (-> (.setAutoRead false)
@@ -293,133 +299,137 @@
       (log/error "Error in http handler" cause)
       (.close ctx))))
 
-(defn parse-req
-  "Parse out nearly everything from HttpRequest except body."
-  [{:keys [ctx] :as bc} ^HttpRequest req]
-  (let [qsd (-> req .uri QueryStringDecoder.)
-        {:keys [headers cookies]}
-        (some->> req .headers .iteratorAsString iterator-seq
-          (reduce
-            ; Are repeated headers already coalesced by netty?
-            ; Does it handle keys case-sensitively?
-            (fn [m [k v]]
-              (let [lck (-> k str/lower-case keyword)]
-                (case lck
-                  :cookie ; TODO omit if empty
-                  (update m :cookies into
-                    (for [^Cookie c (.decode ServerCookieDecoder/STRICT v)]
-                      ; TODO could look up max-age, etc...
-                      [(.name c) (.value c)]))
-                  (update m :headers
-                    (fn [hs]
-                      (if-let [old (get hs lck)]
-                        (if (vector? old)
-                          (conj old v)
-                          [old v])
-                        (assoc hs lck v)))))))
-            {}))]
-    {:ch (-> ctx .channel .id)
-     :type ::request ; TODO needed?
-     :method (-> req .method .toString str/lower-case keyword)
-     :path (.path qsd)
-     :query (.parameters qsd)
-     :protocol (-> req .protocolVersion .toString)
-     :headers headers
-     :cookies cookies
-     :keep-alive? (HttpUtil/isKeepAlive req)
-     :content-length (and (HttpUtil/isContentLengthSet req) (HttpUtil/getContentLength req))}))
+#_(defn parse-req
+    "Parse out nearly everything from HttpRequest except body."
+    [{:keys [ctx] :as bc} ^HttpRequest req]
+    (let [qsd (-> req .uri QueryStringDecoder.)
+          {:keys [headers cookies]}
+          (some->> req .headers .iteratorAsString iterator-seq
+            (reduce
+              ; Are repeated headers already coalesced by netty?
+              ; Does it handle keys case-sensitively?
+              (fn [m [k v]]
+                (let [lck (-> k str/lower-case keyword)]
+                  (case lck
+                    :cookie ; TODO omit if empty
+                    (update m :cookies into
+                      (for [^Cookie c (.decode ServerCookieDecoder/STRICT v)]
+                        ; TODO could look up max-age, etc...
+                        [(.name c) (.value c)]))
+                    (update m :headers
+                      (fn [hs]
+                        (if-let [old (get hs lck)]
+                          (if (vector? old)
+                            (conj old v)
+                            [old v])
+                          (assoc hs lck v)))))))
+              {}))]
+      {:ch (-> ctx .channel .id)
+       :type ::request ; TODO needed?
+       :method (-> req .method .toString str/lower-case keyword)
+       :path (.path qsd)
+       :query (.parameters qsd)
+       :protocol (-> req .protocolVersion .toString)
+       :headers headers
+       :cookies cookies
+       :keep-alive? (HttpUtil/isKeepAlive req)
+       :content-length (and (HttpUtil/isContentLengthSet req) (HttpUtil/getContentLength req))}))
     ; not accommodating body for GET, DELETE, TRACE, OPTIONS or HEAD
     ; (not data) (assoc :content (some-> req .content (.toString (HttpUtil/getCharset req))))))
 
-(defn store
-  "Put processed msg in appropriate record."
-  [so-far msg bc]
-  {:pre [(nil? so-far)]}
-  (if (some-> bc ::content-length (> (:size-threshold bc)))
-    ; Over threshold
-    (apply ->Disk msg (tempfile "http-agg"))
-    ; Under threshold or not stated
-    (->Memory msg nil)))
+#_(defn store
+    "Put processed msg in appropriate record."
+    [so-far msg bc]
+    {:pre [(nil? so-far)]}
+    (if (some-> bc ::content-length (> (:size-threshold bc)))
+      ; Over threshold
+      (apply ->Disk msg (tempfile "http-agg"))
+      ; Under threshold or not stated
+      (->Memory msg nil)))
 
-(defn put
-  "Put message on specified chan."
-  [bc chan-key msg]
-  (or (put! (get bc chan-key) (case chan-key :chunks [bc msg] :messages msg)
-        #(when % (.read (:ctx bc))))
-    (log/error "Dropped incoming http message because" chan-key "channel is closed." msg)))
+#_(defn put
+    "Put message on specified chan."
+    [bc chan-key msg]
+    (or (put! (get bc chan-key) (case chan-key :chunks [bc msg] :messages msg)
+          #(when % (.read (:ctx bc))))
+      (log/error "Dropped incoming http message because" chan-key "channel is closed." msg)))
       ; TODO throw something?
 
-(extend-protocol ChannelInboundMessageHandler
-  ; Interface graph (dispatch on "most specific"):
-  ;   HttpContent
-  ;     -> LastHttpContent
-  ;          |-> FullHttpMessage
-  ;   HttpMessage  |-> FullHttpRequest
-  ;     -> HttpRequest
+#_(extend-protocol ChannelInboundMessageHandler
+    ; Interface graph (dispatch on "most specific"):
+    ;   HttpContent
+    ;     -> LastHttpContent
+    ;          |-> FullHttpMessage
+    ;   HttpMessage  |-> FullHttpRequest
+    ;     -> HttpRequest
 
-  FullHttpRequest ; FIXME need to deal with content if present
-  (channelRead0 [msg bc] (put bc :messages (parse-req bc msg)))
-  (offer [_ _ _])
+    ; https://clojure.org/reference/protocols
+    ; "if one interface is derived from the other, the more derived is used,
+    ;  else which one is used is unspecified"
 
-  ; channelRead0 of HttpRequest, HttpContent and LastHttpContent
-  ; are derived from MessageAggregator -> HttpObjectAggregator.
-  ; Java's access modifiers are really annoying.
+    FullHttpRequest ; FIXME need to deal with content if present
+    (channelRead0 [msg bc] (put bc :messages (parse-req bc msg)))
+    (offer [_ _ _])
 
-  HttpRequest
-  (channelRead0 [msg {:keys [^ChannelHandlerContext ctx state
-                             ^long max-content-length] :as bc}]
-    ; TODO *** hammer through impl, just for http, then contemplate best way to incl ws/refactor
-    ; continue response
-    (if-let [continueResponse (util/continueResponse msg max-content-length (.pipeline ctx))]
-      (let [listener (reify ChannelFutureListener
-                       (operationComplete [_ cf]
-                         (when-not (.isSuccess cf) (.fireExceptionCaught ctx (.cause cf)))))
-            closeOnExpectationFailed false ; config
-            hOM (util/ignoreContentAfterContinueResponse continueResponse)
-            closeAfterWrite (and closeOnExpectationFailed hOM)
-            future (-> ctx (.writeAndFlush continueResponse) (.addListener listener))]
-        (swap! state assoc
-          :handlingOversizeMessage hOM
-          :continueResponseWriteListener listener)
-        (cond closeAfterWrite (.addListener future ChannelFutureListener/CLOSE)
-              hOM ::decoder-returns))) ; FIXME annoying translating to functional flow control
-    ; NB adapting from MessageAggregator decode which is called by same class' channelRead
-    ; which releases the message but that might be right my way
-    ; `out` in decode seems to be the messages it passes through to the next handler, presumably plus the messages it has aggregated
+    ; channelRead0 of HttpRequest, HttpContent and LastHttpContent
+    ; are derived from MessageAggregator -> HttpObjectAggregator.
+    ; Java's access modifiers are really annoying.
+
+    HttpRequest
+    (channelRead0 [msg {:keys [^ChannelHandlerContext ctx state
+                               ^long max-content-length] :as bc}]
+      ; TODO *** hammer through impl, just for http, then contemplate best way to incl ws/refactor
+      ; continue response
+      (if-let [continueResponse (util/continueResponse msg max-content-length (.pipeline ctx))]
+        (let [listener (reify ChannelFutureListener
+                         (operationComplete [_ cf]
+                           (when-not (.isSuccess cf) (.fireExceptionCaught ctx (.cause cf)))))
+              closeOnExpectationFailed false ; config
+              hOM (util/ignoreContentAfterContinueResponse continueResponse)
+              closeAfterWrite (and closeOnExpectationFailed hOM)
+              future (-> ctx (.writeAndFlush continueResponse) (.addListener listener))]
+          (swap! state assoc
+            :handlingOversizeMessage hOM
+            :continueResponseWriteListener listener)
+          (cond closeAfterWrite (.addListener future ChannelFutureListener/CLOSE)
+                hOM ::decoder-returns))) ; FIXME annoying translating to functional flow control
+      ; NB adapting from MessageAggregator decode which is called by same class' channelRead
+      ; which releases the message but that might be right my way
+      ; `out` in decode seems to be the messages it passes through to the next handler, presumably plus the messages it has aggregated
 
 
-    (put bc :chunks msg))
-  (offer [msg so-far bc]
-    (if so-far
-      [::not-first]
-      (if-not (-> msg .decoderResult .isSuccess)
-        [::decoder-fail msg]
-        (let [length (and (HttpUtil/isContentLengthSet msg) (HttpUtil/getContentLength msg))]
-          (if (> length (:max-content-length bc))
-            [::too-long]
-            (let [{:keys [method] :as parsed} (parse-req bc msg)]
-              (case method
-                :post nil ; TODO delegate aggregation to HttpPostRequestDecoder somehow
-                (if (ReferenceCountUtil/release msg)
-                    ; ::content-length redundant with the corresponding header but better-parsed
-                    [::start (store so-far parsed (assoc bc ::content-length length))]
-                    [::release-fail]))))))))
+      (put bc :chunks msg))
+    (offer [msg so-far bc]
+      (if so-far
+        [::not-first]
+        (if-not (-> msg .decoderResult .isSuccess)
+          [::decoder-fail msg]
+          (let [length (and (HttpUtil/isContentLengthSet msg) (HttpUtil/getContentLength msg))]
+            (if (> length (:max-content-length bc))
+              [::too-long]
+              (let [{:keys [method] :as parsed} (parse-req bc msg)]
+                (case method
+                  :post nil ; TODO delegate aggregation to HttpPostRequestDecoder somehow
+                  (if (ReferenceCountUtil/release msg)
+                      ; ::content-length redundant with the corresponding header but better-parsed
+                      [::start (store so-far parsed (assoc bc ::content-length length))]
+                      [::release-fail]))))))))
 
-  HttpContent
-  (channelRead0 [msg bc]
-    (put bc :chunks msg))
-  (offer [msg so-far bc]
-    (if-not so-far
-      [::first-missing]
-      ; TODO stream content either to memory (how exactly?) or disk;
-      ; check if size grows to exceed size-threshold and release netty resource
-      [::ok (accept so-far msg bc)]))
+    HttpContent
+    (channelRead0 [msg bc]
+      (put bc :chunks msg))
+    (offer [msg so-far bc]
+      (if-not so-far
+        [::first-missing]
+        ; TODO stream content either to memory (how exactly?) or disk;
+        ; check if size grows to exceed size-threshold and release netty resource
+        [::ok (accept so-far msg bc)]))
 
-  LastHttpContent
-  (channelRead0 [msg bc] (put bc :chunks msg))
-  (offer [msg so-far bc]
-    ; TODO deal with nil so-far?
-    (if-not so-far
-      [::prev-missing]
-      (let [] ; TODO process msg as above and release netty resource
-        [::last (accept so-far)]))))
+    LastHttpContent
+    (channelRead0 [msg bc] (put bc :chunks msg))
+    (offer [msg so-far bc]
+      ; TODO deal with nil so-far?
+      (if-not so-far
+        [::prev-missing]
+        (let [] ; TODO process msg as above and release netty resource
+          [::last (accept so-far)]))))
