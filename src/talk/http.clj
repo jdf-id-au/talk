@@ -25,9 +25,10 @@
            (io.netty.handler.codec.http.multipart HttpPostRequestDecoder
                                                   InterfaceHttpData
                                                   DefaultHttpDataFactory
-                                                  FileUpload Attribute
                                                   DiskFileUpload DiskAttribute
-                                                  MixedFileUpload MixedAttribute)
+                                                  MixedFileUpload MixedAttribute
+                                                  HttpPostRequestDecoder$ErrorDataDecoderException
+                                                  HttpData InterfaceHttpData$HttpDataType FileUpload)
            (java.io File RandomAccessFile)
            (java.net URLConnection InetSocketAddress)
            (io.netty.channel.group ChannelGroup)))
@@ -209,6 +210,42 @@
                                   protocol-version
                                   HttpResponseStatus/SERVICE_UNAVAILABLE
                                   Unpooled/EMPTY_BUFFER)))))))
+
+(defrecord Request [channel protocol method headers cookies path query])
+; file? explains whether value will be bytes or File
+; keep charset as java.nio.Charset because convenient for decoding
+(defrecord Attribute [channel name charset file? value])
+; TODO support PUT and PATCH ->File
+(defrecord File [channel name charset content-type transfer-encoding file? value])
+
+(defn read-chunkwise [{:keys [state in] :as opts}]
+  (let [^HttpPostRequestDecoder decoder (:decoder @state)
+        ^ChannelHandlerContext ctx (:ctx @state)
+        ch (.channel ctx)]
+    (try
+      (while (.hasNext decoder)
+        (when-let [^InterfaceHttpData data (.next decoder)]
+          (when (= data (:partial @state)) (swap! state dissoc :partial))
+          (condp = (.getHttpDataType data)
+            InterfaceHttpData$HttpDataType/Attribute
+            (let [^io.netty.handler.codec.http.multipart.Attribute d data ; longhand to avoid clash
+                  charset (-> d .getCharset)
+                  file? (-> d .isInMemory not)]
+              (when-not (async/put! in (->Attribute (.id ch)
+                                         (.getName d) (.getCharset d)
+                                         file? (if file? (.getFile d) (.get d))))
+                (log/error "Dropped incoming POST attribute because in chan is closed")))
+            InterfaceHttpData$HttpDataType/FileUpload
+            (let [^FileUpload d data file? (-> d .isInMemory not)]
+              (if (.isCompleted d)
+                (when-not (async/put! in (->File (.id ch)
+                                           (.getFilename d) (.getCharset d)
+                                           (.getContentType d) (.getContentTransferEncoding d)
+                                           file? (if file? (.getFile d) (.get d))))
+                  (log/error "Dropped incoming POST file because in chan is closed"))
+                (log/info "Dropped incoming POST file because upload incomplete")))
+            (log/info "Dropped incoming POST data because unrecognised type")))))))
+
 (def upload-handler
   "Handle HTTP POST/PUT/PATCH data. Does not apply charset automatically.
    NB data >16kB will be stored in tempfiles, which will be lost on JVM shutdown.
@@ -291,21 +328,21 @@
       ; TODO decoder.cleanFiles()
     (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
       ; Would be nice to dispatch using protocol, but I don't own netty types so "shouldn't in lib code".
-      (when-let [^HttpRequest msg (and (instance? HttpRequest obj) obj)]
-        (if (-> msg .decoderResult .isSuccess)
+      (when-let [^HttpRequest req (and (instance? HttpRequest obj) obj)]
+        (if (-> req .decoderResult .isSuccess)
           (let [ch (.channel ctx)
                 id (.id ch)
-                method (.method msg)
-                qsd (-> msg .uri QueryStringDecoder.)
-                keep-alive? (HttpUtil/isKeepAlive msg)
-                protocol-version (.protocolVersion msg) ; get info from req before released (necessary?)
+                method (.method req)
+                qsd (-> req .uri QueryStringDecoder.)
+                keep-alive? (HttpUtil/isKeepAlive req)
+                protocol-version (.protocolVersion req) ; get info from req before released (necessary?)
                 basics {:ch id :type ::request
                         :method (-> method .toString str/lower-case keyword)
                         :path (.path qsd)
                         :query (.parameters qsd)
-                        :protocol (-> msg .protocolVersion .toString)}
+                        :protocol (-> req .protocolVersion .toString)}
                 {:keys [headers cookies]}
-                (some->> msg .headers .iteratorAsString iterator-seq
+                (some->> req .headers .iteratorAsString iterator-seq
                   (reduce
                     ; Are repeated headers already coalesced by netty?
                     ; Does it handle keys case-sensitively?
@@ -325,19 +362,33 @@
                                   [old v])
                                 (assoc hs lck v)))))))
                     {}))
-                {:keys [data cleanup] :or {cleanup (constantly nil)}} (upload-handler msg)
+                decoder (try (HttpPostRequestDecoder. req) ; TODO full setup like upload-handler
+                             (catch HttpPostRequestDecoder$ErrorDataDecoderException e
+                               "5xx and log"))
+                #_{:keys [data cleanup] :or {cleanup (constantly nil)}} (upload-handler req)
                 request-map
                 (cond-> (assoc basics :headers headers :cookies cookies)
-                  data (assoc :data data)
+                  #_#_data (assoc :data data)
                   ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
-                  #_#_(not data) (assoc :content (some-> msg .content
-                                                   (.toString (HttpUtil/getCharset msg)))))]
-            (responder opts protocol-version keep-alive? request-map cleanup))
-          (do (log/info "Decoder failure" (-> msg .decoderResult .cause))
+                  #_#_(not data) (assoc :content (some-> req .content
+                                                   (.toString (HttpUtil/getCharset req)))))]
+            (swap! @state assoc :decoder)
+            ; FIXME this will need to move; rework let scope
+            #_(responder opts protocol-version keep-alive? request-map cleanup))
+          (do (log/info "Decoder failure" (-> req .decoderResult .cause))
               (respond! ctx false (DefaultFullHttpResponse.
-                                    (.protocolVersion msg)
+                                    (.protocolVersion req)
                                     HttpResponseStatus/BAD_REQUEST
-                                    Unpooled/EMPTY_BUFFER))))))
+                                    Unpooled/EMPTY_BUFFER)))))
+      ; After https://github.com/netty/netty/blob/master/example/src/main/java/io/netty/example/http/upload/HttpUploadServerHandler.java
+      (if-let [^HttpPostRequestDecoder decoder (:decoder @state)]
+        (when-let [^HttpContent con (and (instance? HttpContent obj) obj)]
+          (try (.offer decoder obj)
+               (catch HttpPostRequestDecoder$ErrorDataDecoderException e
+                 "5xx and log"))
+          (read-chunkwise) ; TODO from HttpUpload example
+          (when (instance? LastHttpContent obj)
+            "finish up and destroy decoder"))))
     (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
       (log/error "Error in http handler" cause)
       (.close ctx))))
