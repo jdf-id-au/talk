@@ -9,8 +9,8 @@
             [clojure.spec.gen.alpha :as gen])
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
-                             ChannelHandlerContext ChannelFutureListener ChannelOption
-                             DefaultFileRegion ChannelId)
+                             ChannelHandlerContext ChannelFutureListener
+                             DefaultFileRegion)
            (io.netty.handler.codec.http HttpUtil
                                         DefaultFullHttpResponse DefaultHttpResponse
                                         HttpResponseStatus
@@ -27,8 +27,7 @@
                                                   HttpPostRequestDecoder$EndOfDataDecoderException
                                                   InterfaceHttpData$HttpDataType FileUpload)
            (java.io RandomAccessFile)
-           (java.net URLConnection InetSocketAddress)
-           (io.netty.channel.group ChannelGroup)
+           (java.net URLConnection)
            (java.nio.charset Charset)))
 
 ; Bit redundant to spec incoming because Netty will have done some sanity checking.
@@ -99,37 +98,6 @@
 (defrecord Trail [channel cleanup headers]
   Object (toString [r] (str "Cleanup" ())))
 
-(defn track-channel
-  "Register channel in `clients` map and report on `in` chan.
-   Map entry is a map containing `type`, `out-sub` and `addr`, and can be updated.
-
-   Usage:
-   - Call from channelActive.
-   - Detect websocket upgrade handshake, using userEventTriggered, and update `clients` map."
-  [{:keys [^ChannelGroup channel-group
-           state clients in out-pub]}]
-  (let [ctx ^ChannelHandlerContext (:ctx @state)
-        ch (.channel ctx)
-        id (.id ch)
-        cf (.closeFuture ch)
-        out-sub (chan)]
-    (try (.add channel-group ch)
-         (async/sub out-pub id out-sub)
-         (swap! clients assoc id
-           {:type :http ; changed in userEventTriggered
-            :out-sub out-sub
-            :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp)})
-         (when-not (put! in {:ch id :type :talk.api/connection :connected true})
-           (log/error "Unable to report connection because in chan is closed"))
-         (.addListener cf
-           (reify ChannelFutureListener
-             (operationComplete [_ _]
-               (swap! clients dissoc id)
-               (when-not (put! in {:ch id :type :talk.api/connection :connected false})
-                 (log/error "Unable to report disconnection because in chan is closed")))))
-         (catch Exception e
-           (log/error "Unable to register channel" ch e)
-           (throw e)))))
 
 (defn code!
   "Send HTTP response with given status and empty content using HTTP/1.1 or given version."
@@ -281,6 +249,14 @@
                   (assoc hs lck v)))))))
       {})))
 
+; Interface graph:
+;   HttpObject
+;     -> HttpContent
+;          -> LastHttpContent
+;               |-> FullHttpMessage
+;     -> HttpMessage  |-> FullHttpRequest
+;          -> HttpRequest
+
 (defn ^ChannelHandler handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
   ; TODO read about HTTP/2 https://developers.google.com/web/fundamentals/performance/http2
@@ -292,29 +268,20 @@
     (set! (. DiskAttribute deleteOnExitTemporaryFile) true)
     (set! (. DiskAttribute baseDirectory) nil)
     (proxy [SimpleChannelInboundHandler] [HttpObject]
-      (channelActive [^ChannelHandlerContext ctx]
-        ; TODO is this safe?
-        ; Doesn't a given channel keep the same context instance,
-        ; which is set by the pipeline in initChannel?
-        (swap! state assoc :ctx ctx)
-        (track-channel opts)
-        (-> ctx .channel .config
-              ; facilitate backpressure on subsequent reads; requires .read see branches below
-          (-> (.setAutoRead false)
-              ; May be needed for response from outside netty event loop:
-              ; https://stackoverflow.com/a/48128514/780743
-              (.setOption ChannelOption/ALLOW_HALF_CLOSURE true)))
-        (.read ctx)) ; first read
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
+        (log/debug "Received a" (.toString obj))
         (when-let [^HttpRequest req (and (instance? HttpRequest obj) obj)]
           (if-not (-> req .decoderResult .isSuccess)
             (do (log/warn (-> req .decoderResult .cause .getMessage))
                 (code! ctx HttpResponseStatus/BAD_REQUEST))
             (if (some-> req .headers (.get HttpHeaderNames/UPGRADE) (.equalsIgnoreCase "websocket"))
-              (do ; This is probably unnecessary (and noop) because HttpRequest has no content
+              (let [p (.pipeline ctx)]
+                  ; This is probably unnecessary (and noop) because HttpRequest has no content
                   ; and so has no ByteBuf to pass back to pipeline!
-                  ;(ReferenceCountUtil/retain req)
+                  (ReferenceCountUtil/retain req)
                   (log/debug "Passing ws upgrade request through http/handler.")
+                  ; Remove self from pipeline for this channel!
+                  (.remove p "http-handler")
                   (.fireChannelRead ctx req))
               ; (cast Long 0) worked but (long 0) didn't! maybe...
               ; https://stackoverflow.com/questions/12586881/clojure-overloaded-method-resolution-for-longs
@@ -354,7 +321,8 @@
                                                 #(.destroy decoder)
                                                 (-> con .trailingHeaders parse-headers :headers)))
                 (.destroy decoder)
-                (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself."))))))
+                (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself.")))))
+        (log/debug "End of http/handler"))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
         (log/error "Error in http handler" cause)
         (some-> ^HttpPostRequestDecoder (:decoder @state) .destroy)

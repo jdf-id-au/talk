@@ -3,9 +3,7 @@
             [clojure.core.async :as async :refer [chan go go-loop thread >! <! >!! <!! alt! timeout]]
             [taoensso.timbre :as log]
             [clojure.pprint :refer [pprint]])
-  (:import (java.util TimeZone)
-           (talk.http Connection Attribute File Request)
-           (talk.ws Text Binary)))
+  (:import (java.util TimeZone)))
 
 (defn pprint-middleware
   "Middleware after https://github.com/ptaoussanis/timbre/issues/184#issuecomment-397421329"
@@ -29,12 +27,12 @@
 
 (add-tap pprint)
 
-(defmethod clojure.pprint/simple-dispatch Connection [_] prn)
-(defmethod clojure.pprint/simple-dispatch Request [_] prn)
-(defmethod clojure.pprint/simple-dispatch Attribute [_] prn)
-(defmethod clojure.pprint/simple-dispatch File [_] prn)
-(defmethod clojure.pprint/simple-dispatch Text [_] prn)
-(defmethod clojure.pprint/simple-dispatch Binary [_] prn)
+#_(defmethod clojure.pprint/simple-dispatch Connection [_] prn)
+#_(defmethod clojure.pprint/simple-dispatch Request [_] prn)
+#_(defmethod clojure.pprint/simple-dispatch Attribute [_] prn)
+#_(defmethod clojure.pprint/simple-dispatch File [_] prn)
+#_(defmethod clojure.pprint/simple-dispatch Text [_] prn)
+#_(defmethod clojure.pprint/simple-dispatch Binary [_] prn)
 
 #_ (require '[talk.api :as talk])
 

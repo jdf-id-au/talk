@@ -4,12 +4,68 @@
                                                   put! close! alt! alt!!]]
             [talk.http :as http]
             [talk.ws :as ws])
-  (:import (io.netty.channel ChannelInitializer)
+  (:import (io.netty.channel ChannelInitializer ChannelHandlerContext ChannelFutureListener ChannelHandler SimpleChannelInboundHandler ChannelOption)
            (io.netty.channel.socket SocketChannel)
            (io.netty.handler.codec.http HttpServerCodec HttpObjectDecoder HttpObjectAggregator)
            (io.netty.handler.stream ChunkedWriteHandler)
+           (io.netty.handler.codec.http HttpUtil HttpObject)
            (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler
-                                                   WebSocketFrameAggregator)))
+                                                   WebSocketFrameAggregator)
+           (io.netty.channel.group ChannelGroup)
+           (java.net InetSocketAddress)
+           (io.netty.util ReferenceCountUtil)))
+
+(defn track-channel
+  "Register channel in `clients` map and report on `in` chan.
+   Map entry is a map containing `type`, `out-sub` and `addr`, and can be updated.
+
+   Usage:
+   - Call from channelActive.
+   - Detect websocket upgrade handshake, using userEventTriggered, and update `clients` map."
+  [{:keys [^ChannelGroup channel-group
+           state clients in out-pub]}]
+  (let [ctx ^ChannelHandlerContext (:ctx @state)
+        ch (.channel ctx)
+        id (.id ch)
+        cf (.closeFuture ch)
+        out-sub (chan)]
+    (try (.add channel-group ch)
+         (async/sub out-pub id out-sub)
+         (swap! clients assoc id
+           {:type :http ; changed in userEventTriggered
+            :out-sub out-sub
+            :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp)})
+         (when-not (put! in {:ch id :type :talk.api/connection :connected true})
+           (log/error "Unable to report connection because in chan is closed"))
+         (.addListener cf
+           (reify ChannelFutureListener
+             (operationComplete [_ _]
+               (swap! clients dissoc id)
+               (when-not (put! in {:ch id :type :talk.api/connection :connected false})
+                 (log/error "Unable to report disconnection because in chan is closed")))))
+         (catch Exception e
+           (log/error "Unable to register channel" ch e)
+           (throw e)))))
+
+(defn ^ChannelHandler tracker
+  [{:keys [state] :as opts}]
+  (proxy [SimpleChannelInboundHandler] [HttpObject]
+    (channelActive [^ChannelHandlerContext ctx]
+        ; TODO is this safe?
+        ; Doesn't a given channel keep the same context instance,
+        ; which is set by the pipeline in initChannel?
+        (swap! state assoc :ctx ctx)
+        (track-channel opts)
+        (-> ctx .channel .config
+              ; facilitate backpressure on subsequent reads; requires .read see branches below
+          (-> (.setAutoRead false)
+              ; May be needed for response from outside netty event loop:
+              ; https://stackoverflow.com/a/48128514/780743
+              (.setOption ChannelOption/ALLOW_HALF_CLOSURE true)))
+        (.read ctx)) ; first read
+    (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
+      (ReferenceCountUtil/retain obj)
+      (.fireChannelRead ctx obj))))
 
 (defn pipeline
   [^String ws-path
@@ -27,6 +83,7 @@
                              HttpObjectDecoder/DEFAULT_MAX_INITIAL_LINE_LENGTH
                              HttpObjectDecoder/DEFAULT_MAX_HEADER_SIZE
                              max-chunk-size))
+          (.addLast "tracker" (tracker channel-opts))
           ; less network but more memory
           #_(.addLast "http-compr" (HttpContentCompressor.))
           #_(.addLast "http-decompr" (HttpContentDecompressor.))

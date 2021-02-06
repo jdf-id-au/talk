@@ -63,7 +63,9 @@
               out-sub (get-in @clients [id :out-sub])]
           (swap! clients update id assoc :type :ws)
           ; first take!, see send! for subsequent
-          (async/take! out-sub (partial send! ctx out-sub)))))
+          (if out-sub
+            (async/take! out-sub (partial send! ctx out-sub))
+            (log/error "No out-sub channel found")))))
     (channelRead0 [^ChannelHandlerContext ctx ^WebSocketFrame frame]
       ; Should already be off from http handler channelActive:
       #_(-> ctx .channel .config (.setAutoRead false))
