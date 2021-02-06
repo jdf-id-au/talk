@@ -19,25 +19,13 @@
 
 (defn retag [gen-v tag] gen-v) ; copied from jdf/comfort for the moment
 
-(s/def ::ch (s/with-gen #(instance? ChannelId %)
-              #(gen/fmap (fn [_] (DefaultChannelId/newInstance)) (s/gen nil?))))
-(s/def ::connected boolean?)
-(s/def ::connection (s/keys :req-un [::ch ::connected]))
+(s/def ::incoming (s/multi-spec server/message-type retag))
 
-(defmulti message-type :type)
-(defmethod message-type ::connection [_] ::connection) ; spec actually in talk.common
-(defmethod message-type ::http/request [_] ::http/request)
-(defmethod message-type ::ws/text [_] ::ws/text)
-(defmethod message-type ::ws/binary [_] ::ws/binary)
-; :type simplifies dispatch of incoming
-(s/def ::incoming (s/multi-spec message-type retag))
-
-; :type not necessary for outgoing
 (s/def ::outgoing (s/or ::http/response ::http/response
                         ::ws/text ::ws/text
                         ::ws/binary ::ws/binary))
 
-#_ (s/exercise ::http/request) ; can't gen ::incoming, maybe because :type not specced
+#_ (s/exercise ::http/request)
 #_ (s/exercise ::outgoing)
 
 (def defaults

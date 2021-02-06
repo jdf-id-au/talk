@@ -1,9 +1,12 @@
 (ns user
-  (:require [bidi.bidi :as bidi]
+  (:require [talk.api :as talk]
+            [bidi.bidi :as bidi]
             [clojure.core.async :as async :refer [chan go go-loop thread >! <! >!! <!! alt! timeout]]
             [taoensso.timbre :as log]
             [clojure.pprint :refer [pprint]])
-  (:import (java.util TimeZone)))
+  (:import (java.util TimeZone)
+           (talk.http Connection Request Attribute File)
+           (talk.ws Text Binary)))
 
 (defn pprint-middleware
   "Middleware after https://github.com/ptaoussanis/timbre/issues/184#issuecomment-397421329"
@@ -27,48 +30,46 @@
 
 (add-tap pprint)
 
-#_(defmethod clojure.pprint/simple-dispatch Connection [_] prn)
-#_(defmethod clojure.pprint/simple-dispatch Request [_] prn)
-#_(defmethod clojure.pprint/simple-dispatch Attribute [_] prn)
-#_(defmethod clojure.pprint/simple-dispatch File [_] prn)
-#_(defmethod clojure.pprint/simple-dispatch Text [_] prn)
-#_(defmethod clojure.pprint/simple-dispatch Binary [_] prn)
-
-#_ (require '[talk.api :as talk])
+(defmethod clojure.pprint/simple-dispatch Connection [_] prn)
+(defmethod clojure.pprint/simple-dispatch Request [_] prn)
+(defmethod clojure.pprint/simple-dispatch Attribute [_] prn)
+(defmethod clojure.pprint/simple-dispatch File [_] prn)
+(defmethod clojure.pprint/simple-dispatch Text [_] prn)
+(defmethod clojure.pprint/simple-dispatch Binary [_] prn)
 
 #_ ((:close s))
 #_ (def s (talk/server! 8125 {:max-content-length (* 1 1024 1024) #_(* 5 1024 1024 1024)}))
-#_ (def inspect
-     (go-loop [{:keys [ch value] :as msg} (<! (s :in))]
-       (tap> msg)
-       (>! (s :out) {:ch ch :status 200 :content value})
-       (when msg (recur (<! (s :in))))))
-#_ (def echo
-     (go-loop [{:keys [ch connected text method data] :as msg} (<! (s :in))]
-       (log/info "successfully <! from server in" msg)
-       (cond
-         text
-         (when-not (>! (s :out) {:ch ch :text (str "heard you: " text)})
-           (log/error "failed to write to ws server out"))
-
-         (some->> data (map :file) seq)
-         (when-not (>! (s :out) {:ch ch :status 200 :content (->> data (map :file) first)})
-           (log/error "failed to write file response to http server out"))
-
-         method
-         (when-not (>! (s :out) {:ch ch :status 200
-                                 :headers {"Content-Encoding" "text/plain"}
-                                 :content (str "message containing " data ": " msg)})
-           (log/error "failed to write to http server out"))
-
-         connected
-         (log/info "connection" ch connected))
-       (when msg
-         (recur (<! (s :in))))))
-
-; Status:
-; *** need to get upload-handler to look at Attr... file rather than a buffer?? (or up the chain)
-
+#_ (inspect) ; or
+#_ (echo)
+(defn inspect []
+  (go-loop [{:keys [ch value] :as msg} (<! (s :in))]
+    (tap> msg)
+    (>! (s :out) {:ch ch :status 200 :content value})
+    (when msg (recur (<! (s :in))))))
+(defn echo []
+  (go-loop [{:keys [ch data] :as msg} (<! (s :in))]
+    (log/info "successfully <! from server in" msg)
+    (condp instance? msg ; match attachments before request: short-circuits
+      Connection (log/info msg)
+      Attribute (log/info msg)
+      File (log/info msg)
+      Request
+      (do (log/info msg)
+          (when-not (>! (s :out) {:ch ch :status 200
+                                  :headers {"content-encoding" "text/plain"}
+                                  :content (str msg)})
+            (log/error "failed to write to ws server out")))
+      Text
+      (do (log/info msg)
+          (when-not (>! (s :out) {:ch ch :text data})
+            (log/error "failed to write to ws server out")))
+      Binary
+      (do (log/info msg)
+          (when-not (>! (s :out) {:ch ch :binary data})
+            (log/error "failed to write to ws server out"))))
+    (when msg
+      (recur (<! (s :in))))))
+; TODO try closing echo channel
 
 ; Server application can internally publish `in` using topic extracted from @clients :type via <ChannelId>
 ; e.g. yielding {:ch <ChannelId> :method :get ...} for http
@@ -80,7 +81,7 @@
 
 ; Can test file upload POST and PUT with (respectively):
 ; Will only be :file if over threshold (default 16KB)
-; FIXME does seem fairly slow for huge files (what determines chunk size?)
+; FIXME does seem fairly slow for huge files (adjust chunk size?)
 ; % curl http://localhost:8125 -v --form "fileupload=@file.pdf;filename=hmm.pdf"
 ; $ curl http://localhost:8125 -v -T file.pdf
 ; TODO:

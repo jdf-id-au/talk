@@ -2,18 +2,42 @@
   (:require [clojure.tools.logging :as log]
             [clojure.core.async :as async :refer [go go-loop chan <!! >!! <! >!
                                                   put! close! alt! alt!!]]
-            [talk.http :as http]
-            [talk.ws :as ws])
-  (:import (io.netty.channel ChannelInitializer ChannelHandlerContext ChannelFutureListener ChannelHandler SimpleChannelInboundHandler ChannelOption)
+            [talk.http :as http :refer [Request Attribute File Trail]]
+            [talk.ws :as ws :refer [Text Binary]]
+            [clojure.spec.alpha :as s]
+            [clojure.spec.gen.alpha :as gen])
+  (:import (io.netty.channel ChannelInitializer ChannelHandlerContext
+                             ChannelFutureListener ChannelHandler
+                             SimpleChannelInboundHandler ChannelOption
+                             ChannelId DefaultChannelId)
            (io.netty.channel.socket SocketChannel)
-           (io.netty.handler.codec.http HttpServerCodec HttpObjectDecoder HttpObjectAggregator)
+           (io.netty.handler.codec.http HttpServerCodec HttpObjectDecoder
+                                        HttpObjectAggregator)
            (io.netty.handler.stream ChunkedWriteHandler)
            (io.netty.handler.codec.http HttpUtil HttpObject)
            (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler
                                                    WebSocketFrameAggregator)
            (io.netty.channel.group ChannelGroup)
            (java.net InetSocketAddress)
-           (io.netty.util ReferenceCountUtil)))
+           (io.netty.util ReferenceCountUtil)
+           (talk.http Request Attribute File)))
+
+(defrecord Connection [channel open?]
+  Object (toString [r] (str "Channel " (on r) \  (if open? "opened" "closed"))))
+
+(s/def ::open? boolean?)
+(s/def ::Connection (s/keys :req-un [::ch ::open?]))
+
+(s/def ::ch (s/with-gen #(instance? ChannelId %)
+              #(gen/fmap (fn [_] (DefaultChannelId/newInstance)) (s/gen nil?))))
+
+(defmulti message-type class)
+(defmethod message-type Connection [_] ::server/connection)
+(defmethod message-type Request [_] ::http/request)
+(defmethod message-type Attribute [_] ::http/Attribute)
+(defmethod message-type File [_] ::http/File)
+(defmethod message-type Trail [_] ::http/Trail)
+
 
 (defn track-channel
   "Register channel in `clients` map and report on `in` chan.
@@ -35,7 +59,7 @@
            {:type :http ; changed in userEventTriggered
             :out-sub out-sub
             :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp)})
-         (when-not (put! in {:ch id :type :talk.api/connection :connected true})
+         (when-not (put! in (->Connection))
            (log/error "Unable to report connection because in chan is closed"))
          (.addListener cf
            (reify ChannelFutureListener

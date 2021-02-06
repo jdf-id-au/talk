@@ -48,7 +48,7 @@
 (s/def ::parameters map?)
 ; Permissive receive, doesn't enforce HTTP semantics
 (s/def ::Request ; capitalised because defrecord
-  (s/keys :req-un [:talk.api/ch ::protocol ::meta ::method ::headers ::cookies
+  (s/keys :req-un [:talk.server/ch ::protocol ::meta ::method ::headers ::cookies
                    ::uri ::path ::query ::parameters]))
 
 (s/def ::name string?)
@@ -63,9 +63,13 @@
 (s/def ::content-type string?)
 (s/def ::transfer-encoding string?)
 
-(s/def ::Attribute (s/keys :req-un [:talk.api/ch ::name ::charset ::file? ::value]))
+(s/def ::Attribute (s/keys :req-un [:talk.server/ch ::name ::charset ::file? ::value]))
 (s/def ::File
-  (s/keys :req-un [:talk.api/ch ::name ::charset ::content-type ::transfer-encoding ::file? ::value]))
+  (s/keys :req-un [:talk.server/ch ::name ::charset ::content-type ::transfer-encoding ::file? ::value]))
+
+(s/def ::cleanup fn?)
+(s/def ::Trail
+  (s/keys :req-un [:talk.server/ch ::cleanup ::headers]))
 
 (s/def ::status #{; See HttpResponseStatus
                   100 101 102 ; unlikely to use 100s at application level
@@ -83,8 +87,7 @@
 (s/def ::response (s/keys :req-un [::status] :opt-un [::headers ::cookies ::content]))
 
 (def on #(.asShortText (:channel %)))
-(defrecord Connection [channel open?]
-  Object (toString [r] (str "Channel " (on r) \  (if open? "opened" "closed"))))
+
 (defrecord Request [channel protocol meta method headers cookies uri path parameters]
   Object (toString [r] (str (-> method name str/upper-case) \  uri " on channel " (on r))))
 ; file? explains whether value will be bytes or File
@@ -157,7 +160,8 @@
           (if-let [{:keys [status headers cookies content]}
                    (alt! out-sub ([v] v) (async/timeout handler-timeout) nil)]
             (do
-              (if (instance? java.io.File content) ; TODO add support for other streaming sources
+              (if (instance? java.io.File content)
+                ; TODO add support for other streaming sources (use protocols?)
                 ; Streaming:
                 (let [res (DefaultHttpResponse. protocol
                             (HttpResponseStatus/valueOf status))
@@ -269,7 +273,7 @@
     (set! (. DiskAttribute baseDirectory) nil)
     (proxy [SimpleChannelInboundHandler] [HttpObject]
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
-        (log/debug "Received a" (.toString obj))
+        #_(log/debug "Received a" (.toString obj))
         (when-let [^HttpRequest req (and (instance? HttpRequest obj) obj)]
           (if-not (-> req .decoderResult .isSuccess)
             (do (log/warn (-> req .decoderResult .cause .getMessage))
@@ -322,7 +326,7 @@
                                                 (-> con .trailingHeaders parse-headers :headers)))
                 (.destroy decoder)
                 (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself.")))))
-        (log/debug "End of http/handler"))
+        #_(log/debug "End of http/handler"))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
         (log/error "Error in http handler" cause)
         (some-> ^HttpPostRequestDecoder (:decoder @state) .destroy)

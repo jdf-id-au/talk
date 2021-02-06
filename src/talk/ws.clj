@@ -9,40 +9,43 @@
                              SimpleChannelInboundHandler ChannelFutureListener ChannelHandler)
            (io.netty.handler.codec.http.websocketx
              TextWebSocketFrame CorruptedWebSocketFrameException WebSocketFrame
-             WebSocketServerProtocolHandler$HandshakeComplete BinaryWebSocketFrame ContinuationWebSocketFrame)
+             WebSocketServerProtocolHandler$HandshakeComplete BinaryWebSocketFrame)
            (io.netty.handler.codec TooLongFrameException)))
 
 (s/def :plain/text string?)
 (s/def :plain/data bytes?)
-
-(s/def ::text (s/keys :req-un [:talk.api/ch :plain/text]))
-(s/def ::binary (s/keys :req-un [:talk.api/ch :plain/data]))
-
-(defn send! [^ChannelHandlerContext ctx out-sub {:keys [text data] :as msg}]
-  (if msg
-    (let [ch (.channel ctx)
-          id (.id ch)
-          cf (cond text (.writeAndFlush ch (TextWebSocketFrame. ^String text))
-                   data (.writeAndFlush ch (BinaryWebSocketFrame. ^bytes data)))]
-      (.addListener cf
-        (reify ChannelFutureListener
-          (operationComplete [_ f]
-            (when (.isCancelled f)
-              (log/info "Cancelled message" msg "to" id))
-            (when-not (.isSuccess f)
-              (log/error "Send error for" msg "to" id (.cause f)))
-            (log/info "ChannelFutureListener")
-            (async/take! out-sub (partial send! ctx out-sub)))))) ; facilitate backpressure
-    #_(log/info "Out pub-sub closed.")))
+; TODO fix to match records
+(s/def ::text (s/keys :req-un [:talk.server/ch :plain/text]))
+(s/def ::binary (s/keys :req-un [:talk.server/ch :plain/data]))
 
 (def on #(.asShortText (:channel %)))
+
 (defrecord Text [channel data]
   Object
   (toString [r]
     (let [len (count data) long? (> len 10)]
       (str "Text \"" (if long? (str (subs data 0 10) "...")) "\" (" len " chars) on " (on r)))))
 (defrecord Binary [channel data]
-  Object (toString [r] (str "Binary (" (alength data) " bytes on " (on r))))
+  Object
+  (toString [r] (str "Binary (" (alength data) " bytes on " (on r))))
+
+(defn send! [^ChannelHandlerContext ctx out-sub {:keys [text data] :as msg}]
+  (if msg
+    (let [ch (.channel ctx)
+          id (.id ch)]
+      (some-> (cond text (TextWebSocketFrame. ^String text)
+                    data (BinaryWebSocketFrame. ^bytes data))
+        #(.writeAndFlush ch %)
+        (.addListener
+          (reify ChannelFutureListener
+            (operationComplete [_ f]
+              (when (.isCancelled f)
+                (log/info "Cancelled message" msg "to" id))
+              (when-not (.isSuccess f)
+                (log/error "Send error for" msg "to" id (.cause f)))
+              (log/info "ChannelFutureListener")
+              (async/take! out-sub (partial send! ctx out-sub))))))) ; facilitate backpressure
+    #_(log/info "Out pub-sub closed.")))
 
 (defn ^ChannelHandler handler
   "Forward incoming text messages to `in`.
