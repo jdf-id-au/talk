@@ -1,10 +1,11 @@
 (ns user
-  (:require #_[talk.api :as talk]
-            [bidi.bidi :as bidi]
+  (:require [bidi.bidi :as bidi]
             [clojure.core.async :as async :refer [chan go go-loop thread >! <! >!! <!! alt! timeout]]
             [taoensso.timbre :as log]
             [clojure.pprint :refer [pprint]])
-  (:import (java.util TimeZone)))
+  (:import (java.util TimeZone)
+           (talk.http Connection Attribute File Request)
+           (talk.ws Text Binary)))
 
 (defn pprint-middleware
   "Middleware after https://github.com/ptaoussanis/timbre/issues/184#issuecomment-397421329"
@@ -22,20 +23,27 @@
                                   [#{"*"} log-level]]
                       :timestamp-opts {:timezone (TimeZone/getDefault)}}))
 
-(configure :debug)
-(add-tap pprint)
 (set! *warn-on-reflection* true)
+
+(configure :debug)
+
+(add-tap pprint)
+
+(defmethod clojure.pprint/simple-dispatch Connection [_] prn)
+(defmethod clojure.pprint/simple-dispatch Request [_] prn)
+(defmethod clojure.pprint/simple-dispatch Attribute [_] prn)
+(defmethod clojure.pprint/simple-dispatch File [_] prn)
+(defmethod clojure.pprint/simple-dispatch Text [_] prn)
+(defmethod clojure.pprint/simple-dispatch Binary [_] prn)
 
 #_ (require '[talk.api :as talk])
 
 #_ ((:close s))
 #_ (def s (talk/server! 8125 {:max-content-length (* 1 1024 1024) #_(* 5 1024 1024 1024)}))
 #_ (def inspect
-     (go-loop [{:keys [ch connected text method data] :as msg} (<! (s :in))]
-       (tap> ["received" msg])
-       (when-let [[{:keys [file]}] data]
-         (when file (tap> ["file length" (.length file)])))
-       (>! (s :out) {:ch ch :status 200 :content (some-> data first :file)})
+     (go-loop [{:keys [ch value] :as msg} (<! (s :in))]
+       (tap> msg)
+       (>! (s :out) {:ch ch :status 200 :content value})
        (when msg (recur (<! (s :in))))))
 #_ (def echo
      (go-loop [{:keys [ch connected text method data] :as msg} (<! (s :in))]

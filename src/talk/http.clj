@@ -83,9 +83,7 @@
 ; (Some like CORS preflight might need to be stateful and therefore elsewhere... use Netty's impl!)
 (s/def ::response (s/keys :req-un [::status] :opt-un [::headers ::cookies ::content]))
 
-(defn on [{:keys [channel]}]
-  (.asShortText channel))
-
+(def on #(.asShortText (:channel %)))
 (defrecord Connection [channel open?]
   Object (toString [r] (str "Channel " (on r) \  (if open? "opened" "closed"))))
 (defrecord Request [channel protocol meta method headers cookies uri path parameters]
@@ -312,7 +310,7 @@
           (if-not (-> req .decoderResult .isSuccess)
             (do (log/warn (-> req .decoderResult .cause .getMessage))
                 (code! ctx HttpResponseStatus/BAD_REQUEST))
-            (if (-> req .headers (.get HttpHeaderNames/UPGRADE) (.equalsIgnoreCase "websocket"))
+            (if (some-> req .headers (.get HttpHeaderNames/UPGRADE) (.equalsIgnoreCase "websocket"))
               (do ; This is probably unnecessary (and noop) because HttpRequest has no content
                   ; and so has no ByteBuf to pass back to pipeline!
                   ;(ReferenceCountUtil/retain req)

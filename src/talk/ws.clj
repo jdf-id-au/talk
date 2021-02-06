@@ -35,8 +35,14 @@
             (async/take! out-sub (partial send! ctx out-sub)))))) ; facilitate backpressure
     #_(log/info "Out pub-sub closed.")))
 
-(defrecord Text [channel data])
-(defrecord Binary [channel data])
+(def on #(.asShortText (:channel %)))
+(defrecord Text [channel data]
+  Object
+  (toString [r]
+    (let [len (count data) long? (> len 10)]
+      (str "Text \"" (if long? (str (subs data 0 10) "...")) "\" (" len " chars) on " (on r)))))
+(defrecord Binary [channel data]
+  Object (toString [r] (str "Binary (" (alength data) " bytes on " (on r))))
 
 (defn ^ChannelHandler handler
   "Forward incoming text messages to `in`.
