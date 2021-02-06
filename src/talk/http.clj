@@ -47,8 +47,9 @@
 (s/def ::content-transfer-encoding string?)
 (s/def ::charset (s/nilable keyword?))
 (s/def ::value any?)
-(s/def ::file (s/with-gen #(instance? File %) #(gen/fmap (fn [^String p] (File. p))
-                                                 (gen/string))))
+(s/def ::file (s/with-gen #(instance? java.io.File %)
+                #(gen/fmap (fn [^String p] (java.io.File. p))
+                   (gen/string))))
 (s/def ::type any?)
 (s/def ::attachment (s/keys :req-un [(or (and ::name ::charset (or ::value ::file))
                                          (and ::name ::charset ::client-filename
@@ -96,9 +97,9 @@
     (try (.add channel-group ch)
          (async/sub out-pub id out-sub)
          (swap! clients assoc id
-           :type :http ; changed in userEventTriggered
-           :out-sub out-sub
-           :addr (-> ch ^InetSocketAddress .remoteAddress .getAddress HttpUtil/formatHostnameForHttp))
+           {:type :http ; changed in userEventTriggered
+            :out-sub out-sub
+            :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp)})
          (when-not (put! in {:ch id :type :talk.api/connection :connected true})
            (log/error "Unable to report connection because in chan is closed"))
          (.addListener cf
@@ -168,7 +169,7 @@
           (if-let [{:keys [status headers cookies content]}
                    (alt! out-sub ([v] v) (async/timeout handler-timeout) nil)]
             (do
-              (if (instance? File content) ; TODO add support for other streaming sources
+              (if (instance? java.io.File content) ; TODO add support for other streaming sources
                 ; Streaming:
                 (let [res (DefaultHttpResponse. protocol
                             (HttpResponseStatus/valueOf status))
@@ -256,7 +257,8 @@
     (proxy [SimpleChannelInboundHandler] [HttpObject]
       (channelActive [^ChannelHandlerContext ctx]
         ; TODO is this safe?
-        ; Doesn't a given channel keep the same context instance, which is set by the pipeline in initChannel?
+        ; Doesn't a given channel keep the same context instance,
+        ; which is set by the pipeline in initChannel?
         (swap! state assoc :ctx ctx)
         (track-channel opts)
         (-> ctx .channel .config
@@ -271,7 +273,9 @@
           (if-not (-> req .decoderResult .isSuccess)
             (do (log/warn (-> req .decoderResult .cause .getMessage))
                 (code! ctx HttpResponseStatus/BAD_REQUEST))
-            (if (> (HttpUtil/getContentLength req 0) max-content-length)
+            ; (cast Long 0) worked but (long 0) didn't! maybe...
+            ; https://stackoverflow.com/questions/12586881/clojure-overloaded-method-resolution-for-longs
+            (if (> (HttpUtil/getContentLength req (cast Long 0)) max-content-length)
               (do (log/warn "Max content length exceeded")
                   (code! ctx HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE))
               (let [qsd (-> req .uri QueryStringDecoder.)
@@ -302,12 +306,12 @@
                                    (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
                       ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
                       #_ (some-> req .content)]
-                (swap! @state assoc :decoder decoder)
+                (swap! state assoc :decoder decoder)
                 (responder opts
                   (->Request (-> ctx .channel .id)
                              (-> req .protocolVersion .toString)
                              {:keep-alive? (HttpUtil/isKeepAlive req)
-                              :content-length (let [l (HttpUtil/getContentLength req -1)]
+                              :content-length (let [l (HttpUtil/getContentLength req (cast Long -1))]
                                                 (when-not (neg? l) l))
                               :charset (HttpUtil/getCharset req)
                               :content-type (HttpUtil/getMimeType req)}

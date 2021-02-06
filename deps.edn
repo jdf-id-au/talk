@@ -22,7 +22,7 @@
  {:dev {:extra-deps {org.clojure/clojure {:mvn/version "1.10.2"}
                      org.clojure/test.check {:mvn/version "1.1.0"}
                      org.slf4j/slf4j-simple {:mvn/version "1.7.30"}
+                     com.taoensso/timbre {:mvn/version "5.1.2"}
+                     com.fzakaria/slf4j-timbre {:mvn/version "0.3.19"}
                      bidi/bidi {:mvn/version "2.1.6"}}
-        :extra-paths ["dev" "test"]
-        ; https://stackoverflow.com/questions/14544991/how-to-configure-slf4j-simple
-        :jvm-opts ["-Dorg.slf4j.simpleLogger.defaultLogLevel=debug"]}}}
+        :extra-paths ["dev" "test"]}}}

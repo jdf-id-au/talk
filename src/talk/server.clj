@@ -6,13 +6,16 @@
             [talk.ws :as ws])
   (:import (io.netty.channel ChannelInitializer)
            (io.netty.channel.socket SocketChannel)
-           (io.netty.handler.codec.http HttpServerCodec HttpObjectDecoder)
+           (io.netty.handler.codec.http HttpServerCodec HttpObjectDecoder HttpObjectAggregator)
            (io.netty.handler.stream ChunkedWriteHandler)
-           (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler)))
+           (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler
+                                                   WebSocketFrameAggregator)))
 
 (defn pipeline
   [^String ws-path
-   {:keys [^int handshake-timeout ^int max-frame-size ^int max-chunk-size] :as opts}]
+   {:keys [^int handshake-timeout
+           ^int max-frame-size ^int max-message-size
+           ^int max-chunk-size ^int max-content-length] :as opts}]
   (proxy [ChannelInitializer] []
     (initChannel [^SocketChannel ch]
       ; add state atom instead of using netty's Channel.attr
@@ -26,17 +29,18 @@
           ; less network but more memory
           #_(.addLast "http-compr" (HttpContentCompressor.))
           #_(.addLast "http-decompr" (HttpContentDecompressor.))
-
           (.addLast "streamer" (ChunkedWriteHandler.))
-          #_ (.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions
+          (.addLast "http-handler" (http/handler channel-opts))
+          ; Only needed to make WebSocketServerProtocolHandler work!
+          ; http/handler should be before this so HttpPostRequestDecoder streams properly
+          (.addLast "http-agg" (HttpObjectAggregator. max-content-length))
+          #_(.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions
           (.addLast "ws" (WebSocketServerProtocolHandler.
                            ; TODO [application] could specify subprotocol?
                            ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
                            ws-path nil true max-frame-size handshake-timeout))
-
           ; TODO replace with functionality in main handler
-          #_(.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
+          (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
           ; These handlers are functions returning proxy or reify, i.e. new instance per channel:
           ; (See `ChannelHandler` doc regarding state.)
-          (.addLast "ws-handler" (ws/handler channel-opts))
-          (.addLast "http-handler" (http/handler channel-opts)))))))
+          (.addLast "ws-handler" (ws/handler channel-opts)))))))

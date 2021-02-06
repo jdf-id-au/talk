@@ -5,6 +5,8 @@
             [talk.api :as talk]
             [clojure.tools.logging :as log]))
 
+#_ ((:close @server)) ; when tests crash
+
 (defonce server (atom nil))
 (defonce client (atom nil))
 (def port 8124)

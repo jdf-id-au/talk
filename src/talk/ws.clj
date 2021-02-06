@@ -24,7 +24,6 @@
           id (.id ch)
           cf (cond text (.writeAndFlush ch (TextWebSocketFrame. ^String text))
                    data (.writeAndFlush ch (BinaryWebSocketFrame. ^bytes data)))]
-      #_(log/info "send!" msg)
       (.addListener cf
         (reify ChannelFutureListener
           (operationComplete [_ f]
@@ -44,10 +43,10 @@
   ; Copying means twice the memory is temporarily needed, until netty bytebuf released.
   ; Limited by needing to fit in (half of available) memory because of WebSocketFrameAggregator.
   ; Benefit is application not needing to worry about manual memory management...
-  [{:keys [in clients state] :as opts}]
+  [{:keys [in clients] :as opts}]
   (proxy [SimpleChannelInboundHandler] [WebSocketFrame]
     (userEventTriggered [^ChannelHandlerContext ctx evt]
-      ; TODO propagate other user events??
+      ; TODO propagate other user events?
       (when (instance? WebSocketServerProtocolHandler$HandshakeComplete evt)
         (let [ch (.channel ctx)
               id (.id ch)
@@ -56,31 +55,27 @@
           ; first take!, see send! for subsequent
           (async/take! out-sub (partial send! ctx out-sub)))))
     (channelRead0 [^ChannelHandlerContext ctx ^WebSocketFrame frame]
-      ; facilitate backpressure on subsequent reads; requires .read see branches below
-      ;(-> ctx .channel .config (.setAutoRead false)) ; Should already be off from http handler channelActive?
+      ; Should already be off from http handler channelActive:
+      #_(-> ctx .channel .config (.setAutoRead false))
       (let [ch (.channel ctx)
-            id (.id ch)
-            in-err #(log/error "Dropped incoming websocket message because in chan is closed" %)]
-        (log/info "got here")
+            id (.id ch)]
         (condp instance? frame
           TextWebSocketFrame
           (let [text (.text ^TextWebSocketFrame frame)]
-            #_(log/debug "received" (count (.text frame)) "characters from"
-                (.remoteAddress ch) "on channel id" (.id ch))
             ; http://cdn.cognitect.com/presentations/2014/insidechannels.pdf
             ; https://github.com/loganpowell/cljs-guides/blob/master/src/guides/core-async-basics.md
             ; https://clojure.org/guides/core_async_go
             ; put! will throw AssertionError if >1024 requests queue up
             ; Netty prefers async everywhere, which is why I'm not using >!!
-            (when-not (put! in {:ch id :type ::text :text text} #(if % (.read ctx) (in-err text)))
-              (in-err text)))
+            (when-not (put! in {:ch id :type ::text :text text} #(if % (.read ctx)))
+              (log/error "Dropped incoming websocket message because in chan is closed" text)))
               ; TODO do something about closed in chan? Shutdown?
           BinaryWebSocketFrame
           (let [content (.content frame)
                 data (byte-array (.readableBytes content))]
             (.getBytes content 0 data)
-            (when-not (put! in {:ch id :type ::binary :data data} #(if % (.read ctx) (in-err data)))
-              (in-err data)))
+            (when-not (put! in {:ch id :type ::binary :data data} #(if % (.read ctx)))
+              (log/error "Dropped incoming websocket message because in chan is closed" data)))
           (do (log/info "Dropped incoming websocket message because unrecognised type")
               (.read ctx)))))
     (exceptionCaught [^ChannelHandlerContext ctx
@@ -92,24 +87,3 @@
         CorruptedWebSocketFrameException (log/warn (type cause) (.getMessage cause))
         (do (log/error "Error in websocket handler" cause)
             (.close ctx))))))
-
-#_(defrecord Disk [meta file stream]
-    Aggregator
-    (accept [so-far msg bc]))
-
-#_(defrecord Memory [meta content]
-    Aggregator
-    (accept [so-far msg bc]))
-
-#_(extend-protocol ChannelInboundMessageHandler
-    TextWebSocketFrame
-    (channelRead0 [msg bc])
-    (offer [msg so-far bc] (if so-far [:not-first] msg))
-
-    BinaryWebSocketFrame
-    (channelRead0 [msg bc])
-    (offer [msg so-far bc] (if so-far [:not-first] msg))
-
-    ContinuationWebSocketFrame
-    (channelRead0 [msg bc])
-    (offer [msg so-far bc]))
