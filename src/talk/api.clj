@@ -68,6 +68,7 @@
   ; TODO adjust messages to be suitable for spec conformation (see above)
   ([port] (server! port {}))
   ([port opts]
+   (log/debug "Starting server with" opts)
    (let [{:keys [ws-path in-buffer out-buffer] :as opts} (merge defaults opts)
          ; TODO look at aleph for epoll, thread number specification
          loop-group (NioEventLoopGroup.)
@@ -96,6 +97,7 @@
                                                ;:ws-send ws/send!))))
                 ; I think sync here causes binding to fail here rather than later
                 server-cf (-> bootstrap .bind .sync)]
+            (log/debug "Bootstrapped")
             {:close (fn [] (close! out)
                       (some-> server-cf .channel .close .sync)
                       (-> channel-group .close .sync)

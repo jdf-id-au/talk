@@ -35,6 +35,9 @@
             (async/take! out-sub (partial send! ctx out-sub)))))) ; facilitate backpressure
     #_(log/info "Out pub-sub closed.")))
 
+(defrecord Text [channel data])
+(defrecord Binary [channel data])
+
 (defn ^ChannelHandler handler
   "Forward incoming text messages to `in`.
    Send outgoing text messages from `out-sub`.
@@ -44,6 +47,7 @@
   ; Limited by needing to fit in (half of available) memory because of WebSocketFrameAggregator.
   ; Benefit is application not needing to worry about manual memory management...
   [{:keys [in clients] :as opts}]
+  (log/debug "Starting ws handler with" opts)
   (proxy [SimpleChannelInboundHandler] [WebSocketFrame]
     (userEventTriggered [^ChannelHandlerContext ctx evt]
       ; TODO propagate other user events?
@@ -67,14 +71,14 @@
             ; https://clojure.org/guides/core_async_go
             ; put! will throw AssertionError if >1024 requests queue up
             ; Netty prefers async everywhere, which is why I'm not using >!!
-            (when-not (put! in {:ch id :type ::text :text text} #(if % (.read ctx)))
+            (when-not (put! in (->Text id text) #(if % (.read ctx)))
               (log/error "Dropped incoming websocket message because in chan is closed" text)))
               ; TODO do something about closed in chan? Shutdown?
           BinaryWebSocketFrame
           (let [content (.content frame)
                 data (byte-array (.readableBytes content))]
             (.getBytes content 0 data)
-            (when-not (put! in {:ch id :type ::binary :data data} #(if % (.read ctx)))
+            (when-not (put! in (->Binary id data) #(if % (.read ctx)))
               (log/error "Dropped incoming websocket message because in chan is closed" data)))
           (do (log/info "Dropped incoming websocket message because unrecognised type")
               (.read ctx)))))

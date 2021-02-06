@@ -3,26 +3,29 @@
             [bidi.bidi :as bidi]
             [clojure.core.async :as async :refer [chan go go-loop thread >! <! >!! <!! alt! timeout]]
             [taoensso.timbre :as log]
-            [clojure.pprint :as pprint])
+            [clojure.pprint :refer [pprint]])
   (:import (java.util TimeZone)))
 
-(defn pprint
+(defn pprint-middleware
   "Middleware after https://github.com/ptaoussanis/timbre/issues/184#issuecomment-397421329"
   [data]
   (binding [clojure.pprint/*print-right-margin* 100
             clojure.pprint/*print-miser-width* 50]
     (update data :vargs
-      (partial mapv #(if (string? %) % (with-out-str (clojure.pprint/pprint %)))))))
+      (partial mapv #(if (string? %) % (with-out-str (pprint %)))))))
 
 (defn configure
   "Add middleware and config logging with sane defaults."
   [log-level]
-  (log/merge-config! {:middleware [pprint]
+  (log/merge-config! {:middleware [pprint-middleware]
                       :min-level [[#{"io.netty.*"} :info]
                                   [#{"*"} log-level]]
                       :timestamp-opts {:timezone (TimeZone/getDefault)}}))
 
-(configure :info)
+(configure :debug)
+(add-tap pprint)
+(set! *warn-on-reflection* true)
+
 #_ (require '[talk.api :as talk])
 
 #_ ((:close s))
@@ -60,7 +63,6 @@
 ; Status:
 ; *** need to get upload-handler to look at Attr... file rather than a buffer?? (or up the chain)
 
-(add-tap pprint/pprint)
 
 ; Server application can internally publish `in` using topic extracted from @clients :type via <ChannelId>
 ; e.g. yielding {:ch <ChannelId> :method :get ...} for http

@@ -3,7 +3,8 @@
             [clojure.core.async :as async :refer [chan go go-loop thread >! <! >!! <!! alt!]]
             [hato.websocket :as hws]
             [talk.api :as talk]
-            [clojure.tools.logging :as log]))
+            [taoensso.timbre :as log]
+            [talk.ws :as ws]))
 
 #_ ((:close @server)) ; when tests crash
 
@@ -31,7 +32,7 @@
              (<! (go-loop [{:keys [ch text]} (<! (server :in))]
                    ; TODO probably should test connection notices too
                    (if text
-                     (do (>! (server :out) {:ch ch :text text})
+                     (do (>! (server :out) (ws/->Text ch text))
                          (alt! (async/timeout 1000) ::timeout
                                (client :in) ([v] v)))
                      ; drop connection/disconnection notices

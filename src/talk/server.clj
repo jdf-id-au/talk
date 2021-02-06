@@ -16,6 +16,7 @@
    {:keys [^int handshake-timeout
            ^int max-frame-size ^int max-message-size
            ^int max-chunk-size ^int max-content-length] :as opts}]
+  (log/debug "Starting pipeline")
   (proxy [ChannelInitializer] []
     (initChannel [^SocketChannel ch]
       ; add state atom instead of using netty's Channel.attr

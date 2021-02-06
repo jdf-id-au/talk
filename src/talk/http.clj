@@ -28,41 +28,45 @@
                                                   InterfaceHttpData$HttpDataType FileUpload)
            (java.io RandomAccessFile)
            (java.net URLConnection InetSocketAddress)
-           (io.netty.channel.group ChannelGroup)))
+           (io.netty.channel.group ChannelGroup)
+           (java.nio.charset Charset)))
 
 ; Bit redundant to spec incoming because Netty will have done some sanity checking.
 ; Still, good for clarity/gen/testing.
+; Needs to harmonise with deftypes too.
+
+; TODO make all more specific
 (s/def ::protocol #{"" "HTTP/0.9" "HTTP/1.0" "HTTP/1.1"}) ; TODO HTTP/2.0 and followthrough!
-(s/def ::method #{:get :post :put :patch :delete :head :options :trace}) ; ugh redundant
-(s/def ::path string?) ; TODO improve
-(s/def ::query string?) ;
+(s/def ::meta map?)
+(s/def ::method #{:get :post :put :patch :delete :head :options :trace})
 (s/def ::headers (s/map-of keyword? ; TODO lower kw
                    (s/or ::single string?
-                         ::multiple (s/coll-of string? :kind vector?))))
+                     ::multiple (s/coll-of string? :kind vector?))))
 (s/def ::cookies (s/map-of string? string?))
+(s/def ::uri string?)
+(s/def ::path string?)
+(s/def ::query string?)
+(s/def ::parameters map?)
+; Permissive receive, doesn't enforce HTTP semantics
+(s/def ::Request ; capitalised because defrecord
+  (s/keys :req-un [:talk.api/ch ::protocol ::meta ::method ::headers ::cookies
+                   ::uri ::path ::query ::parameters]))
 
 (s/def ::name string?)
-(s/def ::client-filename string?)
-(s/def ::content-type string?)
-(s/def ::content-transfer-encoding string?)
-(s/def ::charset (s/nilable keyword?))
-(s/def ::value any?)
+(s/def ::charset (s/with-gen (s/nilable #(instance? Charset %))
+                   #(gen/fmap (fn [^String s] (Charset/forName s))
+                      #{"ISO-8859-1" "UTF-8"})))
+(s/def ::file? boolean?)
 (s/def ::file (s/with-gen #(instance? java.io.File %)
                 #(gen/fmap (fn [^String p] (java.io.File. p))
                    (gen/string))))
-(s/def ::type any?)
-(s/def ::attachment (s/keys :req-un [(or (and ::name ::charset (or ::value ::file))
-                                         (and ::name ::charset ::client-filename
-                                              ::content-type ::content-transfer-encoding
-                                              (or ::value ::file))
-                                         (and ::name ::type)
-                                         (and ::charset (or ::value ::file)))]))
-(s/def ::data (s/nilable (s/coll-of ::attachment :kind vector?)))
-(s/def ::content (s/or ::file ::file ::string string? ::bytes bytes? ::nil nil?))
+(s/def ::value (s/or ::data bytes? ::file ::file))
+(s/def ::content-type string?)
+(s/def ::transfer-encoding string?)
 
-; Permissive receive, doesn't enforce HTTP semantics
-(s/def ::request (s/keys :req-un [:talk.api/ch ::protocol ::method ::path ::query ::headers]
-                         :opt-un [::cookies ::data]))
+(s/def ::Attribute (s/keys :req-un [:talk.api/ch ::name ::charset ::file? ::value]))
+(s/def ::File
+  (s/keys :req-un [:talk.api/ch ::name ::charset ::content-type ::transfer-encoding ::file? ::value]))
 
 (s/def ::status #{; See HttpResponseStatus
                   100 101 102 ; unlikely to use 100s at application level
@@ -74,11 +78,20 @@
                       431
                   500 501 502 503 504 505 506 507
                   510 511})
-
+(s/def ::content (s/or ::file ::file ::string string? ::bytes bytes? ::nil nil?))
 ; TODO could enforce HTTP semantics in spec (e.g. (s/and ... checking-fn)
 ; (Some like CORS preflight might need to be stateful and therefore elsewhere... use Netty's impl!)
-(s/def ::response (s/keys :req-un [::status]
-                          :opt-un [::headers ::cookies ::content]))
+(s/def ::response (s/keys :req-un [::status] :opt-un [::headers ::cookies ::content]))
+
+(defrecord Connection [channel open?])
+(defrecord Request [channel protocol meta method headers cookies uri path parameters])
+; file? explains whether value will be bytes or File
+; keep charset as java.nio.Charset because convenient for decoding
+(defrecord Attribute [channel name charset file? value])
+; TODO support PUT and PATCH ->File
+(defrecord File [channel name charset content-type transfer-encoding file? value])
+; trailing headers
+(defrecord Trail [channel cleanup headers])
 
 (defn track-channel
   "Register channel in `clients` map and report on `in` chan.
@@ -181,12 +194,12 @@
                   (stream! ctx keep-alive? res content))
                 ; Non-streaming:
                 (let [buf (condp #(%1 %2) content
-                            string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
-                            nil? Unpooled/EMPTY_BUFFER
-                            bytes? (Unpooled/copiedBuffer ^bytes content))
+                           string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
+                           nil? Unpooled/EMPTY_BUFFER
+                           bytes? (Unpooled/copiedBuffer ^bytes content))
                       res (DefaultFullHttpResponse. protocol
                             (HttpResponseStatus/valueOf status)
-                            ^ByteBuf buf)
+                            buf) ; no matching ctor at runtime plus Cursive unhappy
                       hdrs (.headers res)]
                   (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
                   ; TODO need to support repeated headers (other than Set-Cookie ?)
@@ -201,15 +214,6 @@
             (code! ctx HttpResponseStatus/INTERNAL_SERVER_ERROR)))
         (do (log/error "Dropped incoming http request because in chan is closed")
             (code! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))))))
-
-(defrecord Request [channel protocol meta method headers cookies uri path parameters])
-; file? explains whether value will be bytes or File
-; keep charset as java.nio.Charset because convenient for decoding
-(defrecord Attribute [channel name charset file? value])
-; TODO support PUT and PATCH ->File
-(defrecord File [channel name charset content-type transfer-encoding file? value])
-; trailing headers
-(defrecord Trail [channel cleanup headers])
 
 (defn read-chunkwise [{:keys [state in] :as opts}]
   ; TODO work out how to indicate logged errors is while loop to user. Throw and catch? Cleanup?
@@ -249,6 +253,7 @@
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
   ; TODO read about HTTP/2 https://developers.google.com/web/fundamentals/performance/http2
   [{:keys [state in disk-threshold max-content-length] :as opts}]
+  (log/debug "Starting http handler with" opts)
   (let [data-factory (DefaultHttpDataFactory. ^long disk-threshold)]
     (set! (. DiskFileUpload deleteOnExitTemporaryFile) true) ; same as default
     (set! (. DiskFileUpload baseDirectory) nil) ; system temp directory
