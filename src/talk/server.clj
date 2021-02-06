@@ -32,16 +32,15 @@
           #_(.addLast "http-decompr" (HttpContentDecompressor.))
           (.addLast "streamer" (ChunkedWriteHandler.))
           (.addLast "http-handler" (http/handler channel-opts))
-          ; Only needed to make WebSocketServerProtocolHandler work!
-          ; http/handler should be before this so HttpPostRequestDecoder streams properly
+          ; Needed for WebSocketServerProtocolHandler but not wanted for http/handler
+          ; (so HttpPostRequestDecoder streams properly)
+          ; so need to pass through ws upgrade requests...
           (.addLast "http-agg" (HttpObjectAggregator. max-content-length))
           #_(.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions
           (.addLast "ws" (WebSocketServerProtocolHandler.
                            ; TODO [application] could specify subprotocol?
                            ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
                            ws-path nil true max-frame-size handshake-timeout))
-          ; TODO replace with functionality in main handler
+          ; TODO replace with functionality in main handler (e.g. via disk if big)
           (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
-          ; These handlers are functions returning proxy or reify, i.e. new instance per channel:
-          ; (See `ChannelHandler` doc regarding state.)
           (.addLast "ws-handler" (ws/handler channel-opts)))))))

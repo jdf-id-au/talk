@@ -10,7 +10,7 @@
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
                              ChannelHandlerContext ChannelFutureListener ChannelOption
-                             DefaultFileRegion)
+                             DefaultFileRegion ChannelId)
            (io.netty.handler.codec.http HttpUtil
                                         DefaultFullHttpResponse DefaultHttpResponse
                                         HttpResponseStatus
@@ -83,15 +83,23 @@
 ; (Some like CORS preflight might need to be stateful and therefore elsewhere... use Netty's impl!)
 (s/def ::response (s/keys :req-un [::status] :opt-un [::headers ::cookies ::content]))
 
-(defrecord Connection [channel open?])
-(defrecord Request [channel protocol meta method headers cookies uri path parameters])
+(defn on [{:keys [channel]}]
+  (.asShortText channel))
+
+(defrecord Connection [channel open?]
+  Object (toString [r] (str "Channel " (on r) \  (if open? "opened" "closed"))))
+(defrecord Request [channel protocol meta method headers cookies uri path parameters]
+  Object (toString [r] (str (-> method name str/upper-case) \  uri " on channel " (on r))))
 ; file? explains whether value will be bytes or File
 ; keep charset as java.nio.Charset because convenient for decoding
-(defrecord Attribute [channel name charset file? value])
+(defrecord Attribute [channel name charset file? value]
+  Object (toString [r] (str "Attribute " name \  (when file? "written to disk") " from " (on r))))
 ; TODO support PUT and PATCH ->File
-(defrecord File [channel name charset content-type transfer-encoding file? value])
+(defrecord File [channel name charset content-type transfer-encoding file? value]
+  Object (toString [r] (str "FileUpload " name \  (when file? "written to disk") " from " (on r))))
 ; trailing headers
-(defrecord Trail [channel cleanup headers])
+(defrecord Trail [channel cleanup headers]
+  Object (toString [r] (str "Cleanup" ())))
 
 (defn track-channel
   "Register channel in `clients` map and report on `in` chan.
@@ -251,6 +259,30 @@
       (catch HttpPostRequestDecoder$EndOfDataDecoderException e
         (log/info (.getMessage e))))))
 
+(defn parse-headers
+  "Return map containing maps of headers and cookies."
+  [headers]
+  (some->> headers .iteratorAsString iterator-seq
+    (reduce
+      ; Are repeated headers already coalesced by netty?
+      ; Does it handle keys case-sensitively?
+      (fn [m [k v]]
+        (let [lck (-> k str/lower-case keyword)]
+          (case lck
+            :cookie ; TODO omit if empty
+            (update m :cookies into
+              (for [^Cookie c (.decode ServerCookieDecoder/STRICT v)]
+                ; TODO could look at max-age, etc...
+                [(.name c) (.value c)]))
+            (update m :headers
+              (fn [hs]
+                (if-let [old (get hs lck)]
+                  (if (vector? old)
+                    (conj old v)
+                    [old v])
+                  (assoc hs lck v)))))))
+      {})))
+
 (defn ^ChannelHandler handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
   ; TODO read about HTTP/2 https://developers.google.com/web/fundamentals/performance/http2
@@ -280,50 +312,36 @@
           (if-not (-> req .decoderResult .isSuccess)
             (do (log/warn (-> req .decoderResult .cause .getMessage))
                 (code! ctx HttpResponseStatus/BAD_REQUEST))
-            ; (cast Long 0) worked but (long 0) didn't! maybe...
-            ; https://stackoverflow.com/questions/12586881/clojure-overloaded-method-resolution-for-longs
-            (if (> (HttpUtil/getContentLength req (cast Long 0)) max-content-length)
-              (do (log/warn "Max content length exceeded")
-                  (code! ctx HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE))
-              (let [qsd (-> req .uri QueryStringDecoder.)
-                    {:keys [headers cookies]}
-                    (some->> req .headers .iteratorAsString iterator-seq
-                      (reduce
-                        ; Are repeated headers already coalesced by netty?
-                        ; Does it handle keys case-sensitively?
-                        (fn [m [k v]]
-                          (let [lck (-> k str/lower-case keyword)]
-                            (case lck
-                              :cookie ; TODO omit if empty
-                              (update m :cookies into
-                                (for [^Cookie c (.decode ServerCookieDecoder/STRICT v)]
-                                  ; TODO could look at max-age, etc...
-                                  [(.name c) (.value c)]))
-                              (update m :headers
-                                (fn [hs]
-                                  (if-let [old (get hs lck)]
-                                    (if (vector? old)
-                                      (conj old v)
-                                      [old v])
-                                    (assoc hs lck v)))))))
-                        {}))
-                    decoder (try (HttpPostRequestDecoder. data-factory req)
-                                 (catch HttpPostRequestDecoder$ErrorDataDecoderException e
-                                   (log/warn (.getMessage e))
-                                   (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
-                      ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
-                      #_ (some-> req .content)]
-                (swap! state assoc :decoder decoder)
-                (responder opts
-                  (->Request (-> ctx .channel .id)
-                             (-> req .protocolVersion .toString)
-                             {:keep-alive? (HttpUtil/isKeepAlive req)
-                              :content-length (let [l (HttpUtil/getContentLength req (cast Long -1))]
-                                                (when-not (neg? l) l))
-                              :charset (HttpUtil/getCharset req)
-                              :content-type (HttpUtil/getMimeType req)}
-                             (-> req .method .toString str/lower-case keyword)
-                             headers cookies (.uri req) (.path qsd) (.parameters qsd)))))))
+            (if (-> req .headers (.get HttpHeaderNames/UPGRADE) (.equalsIgnoreCase "websocket"))
+              (do ; This is probably unnecessary (and noop) because HttpRequest has no content
+                  ; and so has no ByteBuf to pass back to pipeline!
+                  ;(ReferenceCountUtil/retain req)
+                  (log/debug "Passing ws upgrade request through http/handler.")
+                  (.fireChannelRead ctx req))
+              ; (cast Long 0) worked but (long 0) didn't! maybe...
+              ; https://stackoverflow.com/questions/12586881/clojure-overloaded-method-resolution-for-longs
+              (if (> (HttpUtil/getContentLength req (cast Long 0)) max-content-length)
+                (do (log/warn "Max content length exceeded")
+                    (code! ctx HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE))
+                (let [qsd (-> req .uri QueryStringDecoder.)
+                      {:keys [headers cookies]} (-> req .headers parse-headers)
+                      decoder (try (HttpPostRequestDecoder. data-factory req)
+                                   (catch HttpPostRequestDecoder$ErrorDataDecoderException e
+                                     (log/warn (.getMessage e))
+                                     (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
+                        ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
+                        #_ (some-> req .content)]
+                  (swap! state assoc :decoder decoder)
+                  (responder opts
+                    (->Request (-> ctx .channel .id)
+                               (-> req .protocolVersion .toString)
+                               {:keep-alive? (HttpUtil/isKeepAlive req)
+                                :content-length (let [l (HttpUtil/getContentLength req (cast Long -1))]
+                                                  (when-not (neg? l) l))
+                                :charset (HttpUtil/getCharset req)
+                                :content-type (HttpUtil/getMimeType req)}
+                               (-> req .method .toString str/lower-case keyword)
+                               headers cookies (.uri req) (.path qsd) (.parameters qsd))))))))
         ; After https://github.com/netty/netty/blob/master/example/src/main/java/io/netty/example/http/upload/HttpUploadServerHandler.java
         ; TODO wait and see if HPRD can actually handle PUT and POST
         (when-let [^HttpPostRequestDecoder decoder (:decoder @state)]
@@ -336,7 +354,7 @@
             (when-let [^LastHttpContent con (and (instance? LastHttpContent obj) obj)]
               (when-not (async/put! in (->Trail (-> ctx .channel .id)
                                                 #(.destroy decoder)
-                                                (.trailingHeaders con)))
+                                                (-> con .trailingHeaders parse-headers :headers)))
                 (.destroy decoder)
                 (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself."))))))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
