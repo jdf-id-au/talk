@@ -247,8 +247,8 @@
 (defn ^ChannelHandler handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
   ; TODO read about HTTP/2 https://developers.google.com/web/fundamentals/performance/http2
-  [{:keys [state in] :as opts}]
-  (let [data-factory (DefaultHttpDataFactory.)] ; memory if <16KB, else disk
+  [{:keys [state in disk-threshold max-content-length] :as opts}]
+  (let [data-factory (DefaultHttpDataFactory. ^long disk-threshold)]
     (set! (. DiskFileUpload deleteOnExitTemporaryFile) true) ; same as default
     (set! (. DiskFileUpload baseDirectory) nil) ; system temp directory
     (set! (. DiskAttribute deleteOnExitTemporaryFile) true)
@@ -268,48 +268,51 @@
         (.read ctx)) ; first read
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
         (when-let [^HttpRequest req (and (instance? HttpRequest obj) obj)]
-          (if (-> req .decoderResult .isSuccess)
-            (let [qsd (-> req .uri QueryStringDecoder.)
-                  {:keys [headers cookies]}
-                  (some->> req .headers .iteratorAsString iterator-seq
-                    (reduce
-                      ; Are repeated headers already coalesced by netty?
-                      ; Does it handle keys case-sensitively?
-                      (fn [m [k v]]
-                        (let [lck (-> k str/lower-case keyword)]
-                          (case lck
-                            :cookie ; TODO omit if empty
-                            (update m :cookies into
-                              (for [^Cookie c (.decode ServerCookieDecoder/STRICT v)]
-                                ; TODO could look at max-age, etc...
-                                [(.name c) (.value c)]))
-                            (update m :headers
-                              (fn [hs]
-                                (if-let [old (get hs lck)]
-                                  (if (vector? old)
-                                    (conj old v)
-                                    [old v])
-                                  (assoc hs lck v)))))))
-                      {}))
-                  decoder (try (HttpPostRequestDecoder. data-factory req)
-                               (catch HttpPostRequestDecoder$ErrorDataDecoderException e
-                                 (log/warn (.getMessage e))
-                                 (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
-                    ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
-                    #_ (some-> req .content)]
-              (swap! @state assoc :decoder decoder)
-              (responder opts
-                (->Request (-> ctx .channel .id)
-                           (-> req .protocolVersion .toString)
-                           {:keep-alive? (HttpUtil/isKeepAlive req)
-                            :content-length (let [l (HttpUtil/getContentLength req (long -1))]
-                                              (when-not (neg? l) l))
-                            :charset (HttpUtil/getCharset req)
-                            :content-type (HttpUtil/getMimeType req)}
-                           (-> req .method .toString str/lower-case keyword)
-                           headers cookies (.uri req) (.path qsd) (.parameters qsd))))
+          (if-not (-> req .decoderResult .isSuccess)
             (do (log/warn (-> req .decoderResult .cause .getMessage))
-                (code! ctx HttpResponseStatus/BAD_REQUEST))))
+                (code! ctx HttpResponseStatus/BAD_REQUEST))
+            (if (> (HttpUtil/getContentLength req 0) max-content-length)
+              (do (log/warn "Max content length exceeded")
+                  (code! ctx HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE))
+              (let [qsd (-> req .uri QueryStringDecoder.)
+                    {:keys [headers cookies]}
+                    (some->> req .headers .iteratorAsString iterator-seq
+                      (reduce
+                        ; Are repeated headers already coalesced by netty?
+                        ; Does it handle keys case-sensitively?
+                        (fn [m [k v]]
+                          (let [lck (-> k str/lower-case keyword)]
+                            (case lck
+                              :cookie ; TODO omit if empty
+                              (update m :cookies into
+                                (for [^Cookie c (.decode ServerCookieDecoder/STRICT v)]
+                                  ; TODO could look at max-age, etc...
+                                  [(.name c) (.value c)]))
+                              (update m :headers
+                                (fn [hs]
+                                  (if-let [old (get hs lck)]
+                                    (if (vector? old)
+                                      (conj old v)
+                                      [old v])
+                                    (assoc hs lck v)))))))
+                        {}))
+                    decoder (try (HttpPostRequestDecoder. data-factory req)
+                                 (catch HttpPostRequestDecoder$ErrorDataDecoderException e
+                                   (log/warn (.getMessage e))
+                                   (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
+                      ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
+                      #_ (some-> req .content)]
+                (swap! @state assoc :decoder decoder)
+                (responder opts
+                  (->Request (-> ctx .channel .id)
+                             (-> req .protocolVersion .toString)
+                             {:keep-alive? (HttpUtil/isKeepAlive req)
+                              :content-length (let [l (HttpUtil/getContentLength req -1)]
+                                                (when-not (neg? l) l))
+                              :charset (HttpUtil/getCharset req)
+                              :content-type (HttpUtil/getMimeType req)}
+                             (-> req .method .toString str/lower-case keyword)
+                             headers cookies (.uri req) (.path qsd) (.parameters qsd)))))))
         ; After https://github.com/netty/netty/blob/master/example/src/main/java/io/netty/example/http/upload/HttpUploadServerHandler.java
         ; TODO wait and see if HPRD can actually handle PUT and POST
         (when-let [^HttpPostRequestDecoder decoder (:decoder @state)]

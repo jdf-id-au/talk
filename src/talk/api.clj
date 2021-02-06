@@ -13,7 +13,9 @@
            (io.netty.channel.group DefaultChannelGroup)
            (io.netty.channel.socket.nio NioServerSocketChannel)
            (io.netty.util.concurrent GlobalEventExecutor)
-           (java.net InetSocketAddress)))
+           (java.net InetSocketAddress)
+           (io.netty.handler.codec.http.multipart DefaultHttpDataFactory)
+           (io.netty.handler.codec.http HttpObjectDecoder)))
 
 (defn retag [gen-v tag] gen-v) ; copied from jdf/comfort for the moment
 
@@ -46,11 +48,13 @@
   {; Toplevel
    :ws-path "/ws" :in-buffer 1 :out-buffer 1 :handler-timeout (* 5 1000)
    ; Aggregation
-   :size-threshold (* 16 1024)
+   :disk-threshold DefaultHttpDataFactory/MINSIZE
    ; WebSocket
-   :handshake-timeout (* 5 1000) :max-frame-size (* 64 1024) :max-message-size (* 1024 1024)
+   :handshake-timeout (* 5 1000) ; netty default not public
+   :max-frame-size (* 64 1024) :max-message-size (* 1024 1024)
    ; HTTP
-   :max-content-length (long (* 1 1024 1024))})
+   :max-chunk-size HttpObjectDecoder/DEFAULT_MAX_CHUNK_SIZE
+   :max-content-length (* 1 1024 1024)}) ; limited to int range by netty!
 
 (defn server!
   "Bootstrap a Netty server connected to core.async channels:
