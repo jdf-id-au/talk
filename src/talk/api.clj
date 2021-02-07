@@ -79,7 +79,7 @@
                                              (assoc opts
                                                :channel-group channel-group
                                                :clients clients
-                                               :in in
+                                               :in in :out out
                                                :out-pub out-pub))))
                                                ; avoid dep cycle
                                                ;:ws-send ws/send!))))

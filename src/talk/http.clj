@@ -16,7 +16,7 @@
                                         HttpResponseStatus
                                         FullHttpResponse
                                         HttpHeaderNames QueryStringDecoder HttpResponse
-                                        HttpRequest HttpContent LastHttpContent HttpObject HttpVersion HttpHeaderValues HttpExpectationFailedEvent)
+                                        HttpRequest HttpContent LastHttpContent HttpObject HttpVersion HttpHeaderValues HttpExpectationFailedEvent HttpMessage)
            (io.netty.util CharsetUtil ReferenceCountUtil)
            (io.netty.handler.codec.http.cookie ServerCookieDecoder ServerCookieEncoder Cookie)
            (io.netty.handler.codec.http.multipart HttpPostRequestDecoder
@@ -36,7 +36,8 @@
 
 ; TODO make all more specific
 (s/def ::protocol #{"" "HTTP/0.9" "HTTP/1.0" "HTTP/1.1"}) ; TODO HTTP/2.0 and followthrough!
-(s/def ::meta map?)
+(s/def ::keep-alive? boolean?)
+(s/def ::meta (s/keys :opt-un [::keep-alive?]))
 (s/def ::method #{:get :post :put :patch :delete :head :options :trace})
 (s/def ::headers (s/map-of keyword? ; TODO lower kw
                    (s/or ::single string?
@@ -97,7 +98,7 @@
 ; TODO support PUT and PATCH ->File
 (defrecord File [channel name charset content-type transfer-encoding file? value]
   Object (toString [r] (str "FileUpload " name \  (when file? "written to disk") " from " (on r))))
-; trailing headers
+; trailing headers ; NB if echoing file, should delay cleanup until fully sent
 (defrecord Trail [channel cleanup headers]
   Object (toString [r] (str "Cleanup" ())))
 
@@ -114,10 +115,10 @@
   "Send HTTP response, and manage keep-alive and Content-Length.
    Caller needs to ensure that next incoming message is read!"
   [^ChannelHandlerContext ctx keep-alive? ^FullHttpResponse res]
-  (log/debug "Responding with" res)
+  (log/debug "Responding with" res keep-alive?)
   (let [status (.status res)
-        keep-alive? (and keep-alive?
-                         (contains? #{HttpResponseStatus/OK HttpResponseStatus/CONTINUE} status))]
+        ok-or-continue? (contains? #{HttpResponseStatus/OK HttpResponseStatus/CONTINUE} status)
+        keep-alive? (and keep-alive? ok-or-continue?)]
     (HttpUtil/setKeepAlive res keep-alive?)
     ; May need to review when enabling HttpContentEncoder etc. What about HTTP/2?
     (HttpUtil/setContentLength res (-> res .content .readableBytes))
@@ -153,9 +154,8 @@
 (defn responder
   "Submit request to application and wait for its response, or timeout.
    Read next incoming message (provides backpressure)."
-  [{:keys [in clients handler-timeout state] :as opts} protocol]
-  (let [^ChannelHandlerContext ctx (:ctx @state)
-        {:keys [keep-alive?]} meta
+  [{:keys [clients handler-timeout state] :as opts}]
+  (let [{:keys [^ChannelHandlerContext ctx ^HttpVersion protocol keep-alive?]} @state
         id (-> ctx .channel .id)
         out-sub (get-in @clients [id :out-sub])]
     (go
@@ -180,7 +180,7 @@
                          string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
                          nil? Unpooled/EMPTY_BUFFER
                          bytes? (Unpooled/copiedBuffer ^bytes content))
-                    res (DefaultFullHttpResponse. ; needed protocol hinted to resolve!
+                    res (DefaultFullHttpResponse. ; needed protocol hinted to resolve?
                           protocol
                           (HttpResponseStatus/valueOf status)
                           ^ByteBuf buf)
@@ -280,8 +280,8 @@
 
 (defn manage-expectations
   "Like HttpObjectAggregator, but only manages Expect: 100-continue."
-  [{:keys [state max-content-length] :as opts} req]
-  (let [ctx (:ctx @state)
+  [{:keys [out state max-content-length] :as opts} req]
+  (let [ctx ^ChannelHandlerContext (:ctx @state)
         p (.pipeline ctx)
         keep-alive? (HttpUtil/isKeepAlive req)]
     (cond
@@ -297,7 +297,8 @@
 
       :else
       (do (log/debug "Please continue")
-          (responder opts {:protocol (.protocolVersion req) :status 100})))
+          (async/put! out {:ch (-> ctx .channel .id) :status 100})
+          (responder opts)))
           ; This would probably save a tiny amount of resources, but doesn't read from out-sub...
           ;(respond! ctx keep-alive? (reuse :CONTINUE))))
     (.read ctx)))
@@ -327,8 +328,11 @@
           (let [decoder (try (HttpPostRequestDecoder. data-factory req)
                              (catch HttpPostRequestDecoder$ErrorDataDecoderException e
                                (log/warn e)
-                               (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))]
-            (swap! state assoc :decoder decoder)
+                               (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
+                protocol (.protocolVersion req)]
+            (swap! state assoc :decoder decoder :protocol protocol
+              ; Move this to ->Request meta if want application to be able to manipulate keep-alive
+              :keep-alive? (HttpUtil/isKeepAlive req))
             (cond
               (-> req .decoderResult .isSuccess not)
               (do (log/warn (-> req .decoderResult .cause .getMessage))
@@ -363,14 +367,13 @@
                       #_ (some-> req .content)]
                 (if (async/put! in (->Request (-> ctx .channel .id)
                                      (.toString protocol)
-                                     {:keep-alive? (HttpUtil/isKeepAlive req)
-                                      :content-length (let [l (HttpUtil/getContentLength req (cast Long -1))]
+                                     {:content-length (let [l (HttpUtil/getContentLength req (cast Long -1))]
                                                         (when-not (neg? l) l))
                                       :charset (HttpUtil/getCharset req)
                                       :content-type (HttpUtil/getMimeType req)}
                                      (-> req .method .toString str/lower-case keyword)
                                      headers cookies (.uri req) (.path qsd) (.parameters qsd)))
-                  (responder opts protocol)
+                  (responder opts)
                   (do (log/error "Dropped incoming http request because in chan is closed")
                       (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE)))))))
 
@@ -385,11 +388,12 @@
                    (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
             (read-chunkwise opts)
             (when-let [^LastHttpContent con (and (instance? LastHttpContent obj) obj)]
-              (when-not (async/put! in (->Trail (-> ctx .channel .id)
-                                                #(.destroy decoder)
-                                                (-> con .trailingHeaders parse-headers :headers)))
-                (.destroy decoder)
-                (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself."))))
+              (if (async/put! in (->Trail (-> ctx .channel .id)
+                                          #(.destroy decoder)
+                                          (-> con .trailingHeaders parse-headers :headers)))
+                (responder opts)
+                (do (.destroy decoder)
+                    (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself.")))))
           (.read ctx))
         (log/debug "End of http/handler. Did you read the next incoming message?"))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
