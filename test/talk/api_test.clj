@@ -4,9 +4,8 @@
             [hato.websocket :as hws]
             [talk.api :as talk]
             [taoensso.timbre :as log]
-            [talk.ws :as ws]))
-
-#_ ((:close @server)) ; when tests crash
+            [talk.ws :as ws])
+  (:import (talk.ws Text Binary)))
 
 (defonce server (atom nil))
 (defonce client (atom nil))
@@ -24,19 +23,29 @@
 
 (use-fixtures :once with-server with-client)
 
+(defprotocol Echo
+  (echo [this]))
+
+(extend-protocol Echo
+  Text (echo [{:keys [channel data]}] {:ch channel :text data})
+  Binary (echo [{:keys [channel data]}] {:ch channel :data data}))
+
 (defn round-trip
   "Send message from client to server and back again."
   [msg client server]
   (log/info "about to roundtrip" (count msg) "characters")
   (<!! (go (if (>! (client :out) msg)
-             (<! (go-loop [{:keys [ch text]} (<! (server :in))]
+             (<! (go-loop [{:keys [data] :as msg} (<! (server :in))]
+                   (log/info "Server received" (str msg))
                    ; TODO probably should test connection notices too
-                   (if text
-                     (do (>! (server :out) (ws/->Text ch text))
-                         (alt! (async/timeout 1000) ::timeout
-                               (client :in) ([v] v)))
-                     ; drop connection/disconnection notices
-                     ; clearer with `go-loop` and `if` than xformed chan, `pipe` etc
+                   (if data ; clumsy way of restricting types
+                     (do
+                       (log/info "Trying to send" (str msg))
+                       (do (>! (server :out) (echo msg))
+                           (alt! (async/timeout 1000) (do (log/info "timeout") ::timeout)
+                                 (client :in) ([v] v))))
+                       ; drop connection/disconnection notices
+                       ; clearer with `go-loop` and `if` than xformed chan, `pipe` etc
                      (recur (<! (server :in))))))
              (log/warn "already closed")))))
 
@@ -57,4 +66,4 @@
 
 #_ (@client :ws)
 #_ (hws/close! (@client :ws))
-#_ ((:close @server))
+#_ ((:close @server)) ; when tests crash

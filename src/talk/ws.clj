@@ -24,17 +24,18 @@
   Object
   (toString [r]
     (let [len (count data) long? (> len 10)]
-      (str "Text \"" (if long? (str (subs data 0 10) "...")) "\" (" len " chars) on " (on r)))))
+      (str "<Text \"" (if long? (str (subs data 0 10) "...") data)
+        "\" (" len " chars) on " (on r) \>))))
 (defrecord Binary [channel data]
   Object
-  (toString [r] (str "Binary (" (alength data) " bytes on " (on r))))
+  (toString [r] (str "<Binary (" (alength data) " bytes on " (on r) \>)))
 
 (defn send! [^ChannelHandlerContext ctx out-sub {:keys [text data] :as msg}]
   (if msg
     (let [ch (.channel ctx)
           id (.id ch)
           fr   (cond text (TextWebSocketFrame. ^String text)
-                   data (BinaryWebSocketFrame. ^bytes data))]
+                     data (BinaryWebSocketFrame. ^bytes data))]
       (when fr
         (-> (.writeAndFlush ch fr)
             (.addListener

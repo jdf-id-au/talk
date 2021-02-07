@@ -90,17 +90,17 @@
 (def on #(.asShortText (:channel %)))
 
 (defrecord Request [channel protocol meta method headers cookies uri path parameters]
-  Object (toString [r] (str (-> method name str/upper-case) \  uri " on channel " (on r))))
+  Object (toString [r] (str \< (-> method name str/upper-case) \  uri " on channel " (on r) \>)))
 ; file? explains whether value will be bytes or File
 ; keep charset as java.nio.Charset because convenient for decoding
 (defrecord Attribute [channel name charset file? value]
-  Object (toString [r] (str "Attribute " name \  (when file? "written to disk") " from " (on r))))
+  Object (toString [r] (str "<Attribute " name \  (when file? "written to disk") " from " (on r) \>)))
 ; TODO support PUT and PATCH ->File
 (defrecord File [channel name charset content-type transfer-encoding file? value]
-  Object (toString [r] (str "FileUpload " name \  (when file? "written to disk") " from " (on r))))
+  Object (toString [r] (str "<FileUpload " name \  (when file? "written to disk") " from " (on r) \>)))
 ; trailing headers ; NB if echoing file, should delay cleanup until fully sent
 (defrecord Trail [channel cleanup headers]
-  Object (toString [r] (str "Cleanup" ())))
+  Object (toString [r] (str "<Cleanup " headers \>)))
 
 
 (defn code!
@@ -324,10 +324,14 @@
     (proxy [SimpleChannelInboundHandler] [HttpObject]
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
         (log/debug "Received a" (.toString obj))
+        ; FIXME defence against unwelcome requests (esp large PUT/POST)
         (when-let [^HttpRequest req (and (instance? HttpRequest obj) obj)]
+          (when-not (some-> req .headers (.get HttpHeaderNames/CONTENT_TYPE))
+            (-> req .headers (.set HttpHeaderNames/CONTENT_TYPE
+                               HttpHeaderValues/APPLICATION_OCTET_STREAM)))
           (let [decoder (try (HttpPostRequestDecoder. data-factory req)
                              (catch HttpPostRequestDecoder$ErrorDataDecoderException e
-                               (log/warn e)
+                               (log/warn "Error setting up POST decoder" e)
                                (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
                 protocol (.protocolVersion req)]
             (swap! state assoc :decoder decoder :protocol protocol
@@ -384,7 +388,7 @@
           (when-let [^HttpContent con (and (instance? HttpContent obj) obj)]
             (try (.offer decoder con)
                  (catch HttpPostRequestDecoder$ErrorDataDecoderException e
-                   (log/warn (.getMessage e))
+                   (log/warn "Error running POST decoder" e)
                    (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
             (read-chunkwise opts)
             (when-let [^LastHttpContent con (and (instance? LastHttpContent obj) obj)]
