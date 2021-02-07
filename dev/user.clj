@@ -29,10 +29,10 @@
 
 #_(do
     (require '[talk.api :as talk]) ; delay netty noise until after logger configured
-    (import
-      '(talk.server Connection)
-      '(talk.http Request Attribute File Trail)
-      '(talk.ws Text Binary)))
+    (import ; bad for reloading?
+      (talk.server Connection)
+      (talk.http Request Attribute File Trail)
+      (talk.ws Text Binary)))
 
     ;(defmethod clojure.pprint/simple-dispatch Connection [_] prn)
     ;(defmethod clojure.pprint/simple-dispatch Request [_] prn)
@@ -41,41 +41,37 @@
     ;(defmethod clojure.pprint/simple-dispatch Text [_] prn)
     ;(defmethod clojure.pprint/simple-dispatch Binary [_] prn))
 
+(defn inspect [{:keys [in out]}]
+  (go-loop [{:keys [channel value] :as msg} (<! in)]
+    (tap> msg)
+    (>! out {:ch channel :status 200 :content value})
+    (when msg (recur (<! in)))))
+
+#_(defn echo [{:keys [in out]}]
+    (go-loop [{:keys [channel file? value data value] :as msg} (<! in)]
+      (log/debug "RECEIVE" msg)
+      (when-let [res (condp instance? msg ; remember only one http response!
+                       Connection nil
+                       Trail nil
+                       Attribute {:status 200 :content value}
+                       File {:status 200 :content value}
+                       Request {:status 200 :headers {"content-encoding" "text/plain"}
+                                :content (str msg)}
+                       Text {:text data}
+                       Binary {:binary data}
+                       (log/error "Forgot about" (type msg) msg))]
+        (log/debug "SEND" res)
+        (when-not (>! out (assoc res :ch channel))
+          (log/error "failed to write")))
+      (when msg
+        (recur (<! in)))))
+
 #_ ((:close s))
 #_ (def s (talk/server! 8125 {:max-content-length (* 1 1024 1024) #_(* 5 1024 1024 1024)}))
-#_ (inspect s) ; or
-#_ (echo s)
-(defn inspect [s]
-  (go-loop [{:keys [channel value] :as msg} (<! (s :in))]
-    (tap> msg)
-    (>! (s :out) {:ch channel :status 200 :content value})
-    (when msg (recur (<! (s :in))))))
-#_(defn echo [s]
-    (go-loop [{:keys [channel data] :as msg} (<! (s :in))]
-      (log/info "successfully <! from server in" (type msg) msg)
-      (condp instance? msg ; match attachments before request (think http req->res)
-        Connection (log/info msg)
-        Trail (log/info msg)
-        Attribute (log/info msg)
-        File (log/info msg)
-        Request
-        (let [out {:ch channel :status 200
-                   :headers {"content-encoding" "text/plain"}
-                   :content (str msg)}]
-          (do #_(log/info "SENDING" out)
-              (when-not (>! (s :out) out)
-                (log/error "failed to write to ws server out"))))
-        talk.ws.Text
-        (do (log/info msg)
-            (when-not (>! (s :out) {:ch channel :text data})
-              (log/error "failed to write to ws server out")))
-        Binary
-        (do (log/info msg)
-            (when-not (>! (s :out) {:ch channel :binary data})
-              (log/error "failed to write to ws server out")))
-        (log/error "Forgot about" (type msg) msg))
-      (when msg
-        (recur (<! (s :in))))))
+#_ (def echo-chan (echo s))
+#_ (inspect s)
+
+
 ; TODO try closing echo channel
 
 ; Server application can internally publish `in` using topic extracted from @clients :type via <ChannelId>

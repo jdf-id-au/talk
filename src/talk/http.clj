@@ -16,7 +16,7 @@
                                         HttpResponseStatus
                                         FullHttpResponse
                                         HttpHeaderNames QueryStringDecoder HttpResponse
-                                        HttpRequest HttpContent LastHttpContent HttpObject HttpVersion)
+                                        HttpRequest HttpContent LastHttpContent HttpObject HttpVersion HttpHeaderValues HttpExpectationFailedEvent)
            (io.netty.util CharsetUtil ReferenceCountUtil)
            (io.netty.handler.codec.http.cookie ServerCookieDecoder ServerCookieEncoder Cookie)
            (io.netty.handler.codec.http.multipart HttpPostRequestDecoder
@@ -111,11 +111,13 @@
 
 ; after https://netty.io/4.1/xref/io/netty/example/http/websocketx/server/WebSocketIndexPageHandler.html
 (defn respond!
-  "Send HTTP response, and manage keep-alive and Content-Length."
+  "Send HTTP response, and manage keep-alive and Content-Length.
+   Caller needs to ensure that next incoming message is read!"
   [^ChannelHandlerContext ctx keep-alive? ^FullHttpResponse res]
+  (log/debug "Responding with" res)
   (let [status (.status res)
-        ok? (= status HttpResponseStatus/OK)
-        keep-alive? (and keep-alive? ok?)]
+        keep-alive? (and keep-alive?
+                         (contains? #{HttpResponseStatus/OK HttpResponseStatus/CONTINUE} status))]
     (HttpUtil/setKeepAlive res keep-alive?)
     ; May need to review when enabling HttpContentEncoder etc. What about HTTP/2?
     (HttpUtil/setContentLength res (-> res .content .readableBytes))
@@ -126,6 +128,7 @@
   [^ChannelHandlerContext ctx keep-alive? ^HttpResponse res ^java.io.File file]
    ; after https://github.com/datskos/ring-netty-adapter/blob/master/src/ring/adapter/plumbing.clj and current docs
   (assert (.isFile file))
+  (log/debug "STREAMING" res)
   (let [status (.status res)
         ok? (= status HttpResponseStatus/OK)
         keep-alive? (and keep-alive? ok?)
@@ -147,87 +150,53 @@
     (let [cf (.writeAndFlush ctx region)] ; encoded into several HttpContents?
       (when-not keep-alive? (.addListener cf ChannelFutureListener/CLOSE)))))
 
-(defn responder [{:keys [in clients handler-timeout state] :as opts}
-                 {:keys [protocol meta] :as req}]
+(defn responder
+  "Submit request to application and wait for its response, or timeout.
+   Read next incoming message (provides backpressure)."
+  [{:keys [in clients handler-timeout state] :as opts} protocol]
   (let [^ChannelHandlerContext ctx (:ctx @state)
         {:keys [keep-alive?]} meta
         id (-> ctx .channel .id)
-        out-sub (get-in @clients [id :out-sub])
-        protocol (HttpVersion/valueOf protocol)]
+        out-sub (get-in @clients [id :out-sub])]
     (go
-      (if (>! in req)
-        (try
-          (if-let [{:keys [status headers cookies content]}
-                   (alt! out-sub ([v] v) (async/timeout handler-timeout) nil)]
-            (do
-              (if (instance? java.io.File content)
-                ; TODO add support for other streaming sources (use protocols?)
-                ; Streaming:
-                (let [res (DefaultHttpResponse. protocol
-                            (HttpResponseStatus/valueOf status))
-                      hdrs (.headers res)]
-                  (doseq [[k v] headers] (.set hdrs (name k) v))
-                  (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
-                    (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
-                  ; TODO trailing headers?
-                  (stream! ctx keep-alive? res content))
-                ; Non-streaming:
-                (let [buf (condp #(%1 %2) content
-                           string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
-                           nil? Unpooled/EMPTY_BUFFER
-                           bytes? (Unpooled/copiedBuffer ^bytes content))
-                      res (DefaultFullHttpResponse. ; needed protocol hinted to resolve!
-                            protocol
-                            (HttpResponseStatus/valueOf status)
-                            ^ByteBuf buf)
-                      hdrs (.headers res)]
-                  (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
-                  ; TODO need to support repeated headers (other than Set-Cookie ?)
-                  (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
-                    (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
-                  (respond! ctx keep-alive? res)))
-              (.read ctx)) ; because autoRead is false
-            (do (log/error "Dropped incoming http request because of out chan timeout")
-                (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE)))
-          (catch Exception e
-            (log/error "Error in http response handler" e)
-            (code! ctx protocol HttpResponseStatus/INTERNAL_SERVER_ERROR)))
-        (do (log/error "Dropped incoming http request because in chan is closed")
-            (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE))))))
+      (try
+        (if-let [{:keys [status headers cookies content] :as res}
+                 (alt! out-sub ([v] v) (async/timeout handler-timeout) nil)]
+          (do
+            (log/debug "TRYING TO SEND" res)
+            (if (instance? java.io.File content)
+              ; TODO add support for other streaming sources (use protocols?)
+              ; Streaming:
+              (let [res (DefaultHttpResponse. protocol
+                          (HttpResponseStatus/valueOf status))
+                    hdrs (.headers res)]
+                (doseq [[k v] headers] (.set hdrs (name k) v))
+                (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
+                  (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
+                ; TODO trailing headers?
+                (stream! ctx keep-alive? res content))
+              ; Non-streaming:
+              (let [buf (condp #(%1 %2) content
+                         string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
+                         nil? Unpooled/EMPTY_BUFFER
+                         bytes? (Unpooled/copiedBuffer ^bytes content))
+                    res (DefaultFullHttpResponse. ; needed protocol hinted to resolve!
+                          protocol
+                          (HttpResponseStatus/valueOf status)
+                          ^ByteBuf buf)
+                    hdrs (.headers res)]
+                (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
+                ; TODO need to support repeated headers (other than Set-Cookie ?)
+                (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
+                  (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
+                (respond! ctx keep-alive? res)))
+            (.read ctx)) ; because autoRead is false
+          (do (log/error "Dropped incoming http request because of out chan timeout")
+              (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE)))
+        (catch Exception e
+          (log/error "Error in http response handler" e)
+          (code! ctx protocol HttpResponseStatus/INTERNAL_SERVER_ERROR))))))
 
-(defn read-chunkwise [{:keys [state in] :as opts}]
-  ; TODO work out how to indicate logged errors is while loop to user. Throw and catch? Cleanup?
-  (let [^HttpPostRequestDecoder decoder (:decoder @state)
-        ^ChannelHandlerContext ctx (:ctx @state)
-        ch (.channel ctx)]
-    (try
-      (while (.hasNext decoder)
-        (when-let [^InterfaceHttpData data (.next decoder)]
-          (when (= data (:partial @state)) (swap! state dissoc :partial))
-          (condp = (.getHttpDataType data)
-            InterfaceHttpData$HttpDataType/Attribute
-            (let [^io.netty.handler.codec.http.multipart.Attribute d data ; longhand to avoid clash
-                  file? (-> d .isInMemory not)]
-              (when-not (async/put! in (->Attribute (.id ch)
-                                         (.getName d) (.getCharset d)
-                                         file? (if file? (.getFile d) (.get d))))
-                (log/error "Dropped incoming POST attribute because in chan is closed")))
-            InterfaceHttpData$HttpDataType/FileUpload
-            (let [^FileUpload d data file? (-> d .isInMemory not)]
-              (if (.isCompleted d)
-                (if (async/put! in (->File (.id ch)
-                                     (.getFilename d) (.getCharset d)
-                                     (.getContentType d) (.getContentTransferEncoding d)
-                                     file? (if file? (.getFile d) (.get d))))
-                  (log/error "Dropped incoming POST file because in chan is closed"))
-                (log/info "Dropped incoming POST file because upload incomplete")))
-            (log/info "Dropped incoming POST data because unrecognised type"))))
-      (when-let [^InterfaceHttpData data (.currentPartialHttpData decoder)]
-        (when-not (:partial @state)
-          (swap! state assoc :partial data)))
-          ; TODO could do finer-grained logging/events etc
-      (catch HttpPostRequestDecoder$EndOfDataDecoderException e
-        (log/info (.getMessage e))))))
 
 (defn parse-headers
   "Return map containing maps of headers and cookies."
@@ -253,6 +222,86 @@
                   (assoc hs lck v)))))))
       {})))
 
+(defn read-chunkwise [{:keys [state in] :as opts}]
+  ; TODO work out how to indicate logged errors is while loop to user. Throw and catch? Cleanup?
+  (let [^HttpPostRequestDecoder decoder (:decoder @state)
+        ^ChannelHandlerContext ctx (:ctx @state)
+        ch (.channel ctx)]
+    (try
+      (while (.hasNext decoder)
+        (when-let [^InterfaceHttpData data (.next decoder)]
+          (when (= data (:partial @state)) (swap! state dissoc :partial))
+          (condp = (.getHttpDataType data)
+            InterfaceHttpData$HttpDataType/Attribute
+            (let [^io.netty.handler.codec.http.multipart.Attribute d data ; longhand to avoid clash
+                  file? (-> d .isInMemory not)]
+              (when-not (async/put! in (->Attribute (.id ch)
+                                         (.getName d) (.getCharset d)
+                                         file? (if file? (.getFile d) (.get d))))
+                (log/error "Dropped incoming POST attribute because in chan is closed")))
+            InterfaceHttpData$HttpDataType/FileUpload
+            (let [^FileUpload d data file? (-> d .isInMemory not)]
+              (if (.isCompleted d)
+                (when-not (async/put! in (->File (.id ch)
+                                           (.getFilename d) (.getCharset d)
+                                           (.getContentType d) (.getContentTransferEncoding d)
+                                           file? (if file? (.getFile d) (.get d))))
+                  (log/error "Dropped incoming POST file because in chan is closed"))
+                (log/info "Dropped incoming POST file because upload incomplete")))
+            (log/info "Dropped incoming POST data because unrecognised type"))))
+      (when-let [^InterfaceHttpData data (.currentPartialHttpData decoder)]
+        (when-not (:partial @state)
+          (swap! state assoc :partial data)))
+          ; TODO could do finer-grained logging/events etc
+      (catch HttpPostRequestDecoder$EndOfDataDecoderException e
+        (log/info (.getMessage e))))))
+
+(defn dfhr [^HttpResponseStatus s & {:as headers}]
+  (let [r (DefaultFullHttpResponse. HttpVersion/HTTP_1_1 s Unpooled/EMPTY_BUFFER)]
+    (doseq [[k v] headers] (-> r .headers (.set ^CharSequence k ^Object v)))
+    r))
+
+(def response
+  {:EXPECTATION_FAILED
+    (dfhr HttpResponseStatus/EXPECTATION_FAILED
+     HttpHeaderNames/CONTENT_LENGTH 0)
+   :CONTINUE
+    (dfhr HttpResponseStatus/CONTINUE)
+   :TOO_LARGE
+    (dfhr HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE
+     HttpHeaderNames/CONTENT_LENGTH 0)
+   :TOO_LARGE_CLOSE
+    (dfhr HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE
+     HttpHeaderNames/CONTENT_LENGTH 0
+     HttpHeaderNames/CONNECTION HttpHeaderValues/CLOSE)})
+
+(defn reuse [status]
+  (-> response status .retainedDuplicate))
+
+(defn manage-expectations
+  "Like HttpObjectAggregator, but only manages Expect: 100-continue."
+  [{:keys [state max-content-length] :as opts} req]
+  (let [ctx (:ctx @state)
+        p (.pipeline ctx)
+        keep-alive? (HttpUtil/isKeepAlive req)]
+    (cond
+      (-> req .protocolVersion (.compareTo HttpVersion/HTTP_1_1) (< 0))
+      (do (log/debug "Wrong HTTP version")
+          (.fireUserEventTriggered p HttpExpectationFailedEvent/INSTANCE)
+          (respond! ctx keep-alive? (reuse :EXPECTATION_FAILED)))
+
+      (> (HttpUtil/getContentLength req (cast Long 0)) max-content-length)
+      (do (log/debug "Too large")
+          (.fireUserEventTriggered p HttpExpectationFailedEvent/INSTANCE)
+          (respond! ctx keep-alive? (reuse :TOO_LARGE)))
+
+      :else
+      (do (log/debug "Please continue")
+          (responder opts {:protocol (.protocolVersion req) :status 100})))
+          ; This would probably save a tiny amount of resources, but doesn't read from out-sub...
+          ;(respond! ctx keep-alive? (reuse :CONTINUE))))
+    (.read ctx)))
+
 ; Interface graph:
 ;   HttpObject
 ;     -> HttpContent
@@ -273,12 +322,24 @@
     (set! (. DiskAttribute baseDirectory) nil)
     (proxy [SimpleChannelInboundHandler] [HttpObject]
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
-        #_(log/debug "Received a" (.toString obj))
+        (log/debug "Received a" (.toString obj))
         (when-let [^HttpRequest req (and (instance? HttpRequest obj) obj)]
-          (if-not (-> req .decoderResult .isSuccess)
-            (do (log/warn (-> req .decoderResult .cause .getMessage))
-                (code! ctx HttpResponseStatus/BAD_REQUEST))
-            (if (some-> req .headers (.get HttpHeaderNames/UPGRADE) (.equalsIgnoreCase "websocket"))
+          (let [decoder (try (HttpPostRequestDecoder. data-factory req)
+                             (catch HttpPostRequestDecoder$ErrorDataDecoderException e
+                               (log/warn e)
+                               (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))]
+            (swap! state assoc :decoder decoder)
+            (cond
+              (-> req .decoderResult .isSuccess not)
+              (do (log/warn (-> req .decoderResult .cause .getMessage))
+                  (code! ctx HttpResponseStatus/BAD_REQUEST))
+
+              (some-> req .headers (.get HttpHeaderNames/EXPECT)
+                (.equalsIgnoreCase (.toString HttpHeaderValues/CONTINUE)))
+              (manage-expectations opts req)
+
+              (some-> req .headers (.get HttpHeaderNames/UPGRADE)
+                (.equalsIgnoreCase (.toString HttpHeaderValues/WEBSOCKET)))
               (let [p (.pipeline ctx)]
                   ; This is probably unnecessary (and noop) because HttpRequest has no content
                   ; and so has no ByteBuf to pass back to pipeline!
@@ -287,33 +348,36 @@
                   ; Remove self from pipeline for this channel!
                   (.remove p "http-handler")
                   (.fireChannelRead ctx req))
-              ; (cast Long 0) worked but (long 0) didn't! maybe...
-              ; https://stackoverflow.com/questions/12586881/clojure-overloaded-method-resolution-for-longs
-              (if (> (HttpUtil/getContentLength req (cast Long 0)) max-content-length)
-                (do (log/warn "Max content length exceeded")
-                    (code! ctx HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE))
-                (let [qsd (-> req .uri QueryStringDecoder.)
-                      {:keys [headers cookies]} (-> req .headers parse-headers)
-                      decoder (try (HttpPostRequestDecoder. data-factory req)
-                                   (catch HttpPostRequestDecoder$ErrorDataDecoderException e
-                                     (log/warn (.getMessage e))
-                                     (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
-                        ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
-                        #_ (some-> req .content)]
-                  (swap! state assoc :decoder decoder)
-                  (responder opts
-                    (->Request (-> ctx .channel .id)
-                               (-> req .protocolVersion .toString)
-                               {:keep-alive? (HttpUtil/isKeepAlive req)
-                                :content-length (let [l (HttpUtil/getContentLength req (cast Long -1))]
-                                                  (when-not (neg? l) l))
-                                :charset (HttpUtil/getCharset req)
-                                :content-type (HttpUtil/getMimeType req)}
-                               (-> req .method .toString str/lower-case keyword)
-                               headers cookies (.uri req) (.path qsd) (.parameters qsd))))))))
+
+               ; (cast Long 0) worked but (long 0) didn't! maybe...
+               ; https://stackoverflow.com/questions/12586881/clojure-overloaded-method-resolution-for-longs
+              (> (HttpUtil/getContentLength req (cast Long 0)) max-content-length)
+              (do (log/warn "Max content length exceeded")
+                  (code! ctx HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE))
+
+              :else
+              (let [qsd (-> req .uri QueryStringDecoder.)
+                    {:keys [headers cookies]} (-> req .headers parse-headers)
+                    protocol (.protocolVersion req)
+                      ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
+                      #_ (some-> req .content)]
+                (if (async/put! in (->Request (-> ctx .channel .id)
+                                     (.toString protocol)
+                                     {:keep-alive? (HttpUtil/isKeepAlive req)
+                                      :content-length (let [l (HttpUtil/getContentLength req (cast Long -1))]
+                                                        (when-not (neg? l) l))
+                                      :charset (HttpUtil/getCharset req)
+                                      :content-type (HttpUtil/getMimeType req)}
+                                     (-> req .method .toString str/lower-case keyword)
+                                     headers cookies (.uri req) (.path qsd) (.parameters qsd)))
+                  (responder opts protocol)
+                  (do (log/error "Dropped incoming http request because in chan is closed")
+                      (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE)))))))
+
         ; After https://github.com/netty/netty/blob/master/example/src/main/java/io/netty/example/http/upload/HttpUploadServerHandler.java
         ; TODO wait and see if HPRD can actually handle PUT and POST
         (when-let [^HttpPostRequestDecoder decoder (:decoder @state)]
+          (log/debug "decoding")
           (when-let [^HttpContent con (and (instance? HttpContent obj) obj)]
             (try (.offer decoder con)
                  (catch HttpPostRequestDecoder$ErrorDataDecoderException e
@@ -325,8 +389,9 @@
                                                 #(.destroy decoder)
                                                 (-> con .trailingHeaders parse-headers :headers)))
                 (.destroy decoder)
-                (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself.")))))
-        #_(log/debug "End of http/handler"))
+                (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself."))))
+          (.read ctx))
+        (log/debug "End of http/handler. Did you read the next incoming message?"))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
         (log/error "Error in http handler" cause)
         (some-> ^HttpPostRequestDecoder (:decoder @state) .destroy)
