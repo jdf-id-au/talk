@@ -6,7 +6,8 @@
                                                   put! close! alt! alt!!]]
             [clojure.string :as str]
             [clojure.spec.alpha :as s]
-            [clojure.spec.gen.alpha :as gen])
+            [clojure.spec.gen.alpha :as gen]
+            [talk.util :refer [on briefly]])
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
                              ChannelHandlerContext ChannelFutureListener
@@ -87,8 +88,6 @@
 ; (Some like CORS preflight might need to be stateful and therefore elsewhere... use Netty's impl!)
 (s/def ::response (s/keys :req-un [::status] :opt-un [::headers ::cookies ::content]))
 
-(def on #(.asShortText (:channel %)))
-
 (defrecord Request [channel protocol meta method headers cookies uri path parameters]
   Object (toString [r] (str \< (-> method name str/upper-case) \  uri " on channel " (on r) \>)))
 ; file? explains whether value will be bytes or File
@@ -113,9 +112,9 @@
 ; after https://netty.io/4.1/xref/io/netty/example/http/websocketx/server/WebSocketIndexPageHandler.html
 (defn respond!
   "Send HTTP response, and manage keep-alive and Content-Length.
-   Caller needs to ensure that next incoming message is read!"
+   Caller needs to fire channel read!"
   [^ChannelHandlerContext ctx keep-alive? ^FullHttpResponse res]
-  (log/debug "Responding with" res keep-alive?)
+  (log/debug "Responding" res)
   (let [status (.status res)
         ok-or-continue? (contains? #{HttpResponseStatus/OK HttpResponseStatus/CONTINUE} status)
         keep-alive? (and keep-alive? ok-or-continue?)]
@@ -129,7 +128,7 @@
   [^ChannelHandlerContext ctx keep-alive? ^HttpResponse res ^java.io.File file]
    ; after https://github.com/datskos/ring-netty-adapter/blob/master/src/ring/adapter/plumbing.clj and current docs
   (assert (.isFile file))
-  (log/debug "STREAMING" res)
+  (log/debug "Streaming" res)
   (let [status (.status res)
         ok? (= status HttpResponseStatus/OK)
         keep-alive? (and keep-alive? ok?)
@@ -153,7 +152,7 @@
 
 (defn responder
   "Submit request to application and wait for its response, or timeout.
-   Read next incoming message (provides backpressure)."
+   Fires channel read (provides backpressure)."
   [{:keys [clients handler-timeout state] :as opts}]
   (let [{:keys [^ChannelHandlerContext ctx ^HttpVersion protocol keep-alive?]} @state
         id (-> ctx .channel .id)
@@ -161,9 +160,10 @@
     (go
       (try
         (if-let [{:keys [status headers cookies content] :as res}
+                 ; Fetch application message published to this channel
                  (alt! out-sub ([v] v) (async/timeout handler-timeout) nil)]
           (do
-            (log/debug "TRYING TO SEND" res)
+            (log/debug "Trying to send" res)
             (if (instance? java.io.File content)
               ; TODO add support for other streaming sources (use protocols?)
               ; Streaming:
@@ -222,39 +222,45 @@
                   (assoc hs lck v)))))))
       {})))
 
-(defn read-chunkwise [{:keys [state in] :as opts}]
+(defn read-chunkwise
+  "Reads from HttpPostDecoder and also fires channel read."
+  [{:keys [state in] :as opts}]
   ; TODO work out how to indicate logged errors is while loop to user. Throw and catch? Cleanup?
   (let [^HttpPostRequestDecoder decoder (:decoder @state)
         ^ChannelHandlerContext ctx (:ctx @state)
         ch (.channel ctx)]
     (try
       (while (.hasNext decoder)
+        (log/debug "decoder has next")
         (when-let [^InterfaceHttpData data (.next decoder)]
           (when (= data (:partial @state)) (swap! state dissoc :partial))
           (condp = (.getHttpDataType data)
             InterfaceHttpData$HttpDataType/Attribute
             (let [^io.netty.handler.codec.http.multipart.Attribute d data ; longhand to avoid clash
                   file? (-> d .isInMemory not)]
-              (when-not (async/put! in (->Attribute (.id ch)
-                                         (.getName d) (.getCharset d)
-                                         file? (if file? (.getFile d) (.get d))))
+              (when-not (async/put! in
+                          (->Attribute (.id ch)
+                            (.getName d) (.getCharset d)
+                            file? (if file? (.getFile d) (.get d))))
                 (log/error "Dropped incoming POST attribute because in chan is closed")))
             InterfaceHttpData$HttpDataType/FileUpload
             (let [^FileUpload d data file? (-> d .isInMemory not)]
               (if (.isCompleted d)
-                (when-not (async/put! in (->File (.id ch)
-                                           (.getFilename d) (.getCharset d)
-                                           (.getContentType d) (.getContentTransferEncoding d)
-                                           file? (if file? (.getFile d) (.get d))))
+                (when-not (async/put! in
+                            (->File (.id ch)
+                              (.getFilename d) (.getCharset d)
+                              (.getContentType d) (.getContentTransferEncoding d)
+                              file? (if file? (.getFile d) (.get d))))
                   (log/error "Dropped incoming POST file because in chan is closed"))
                 (log/info "Dropped incoming POST file because upload incomplete")))
             (log/info "Dropped incoming POST data because unrecognised type"))))
       (when-let [^InterfaceHttpData data (.currentPartialHttpData decoder)]
+        (log/debug "partial decoding")
         (when-not (:partial @state)
           (swap! state assoc :partial data)))
           ; TODO could do finer-grained logging/events etc
       (catch HttpPostRequestDecoder$EndOfDataDecoderException e
-        (log/info (.getMessage e))))))
+        (log/info (type e) (some->> e .getMessage (briefly 120)))))))
 
 (defn dfhr [^HttpResponseStatus s & {:as headers}]
   (let [r (DefaultFullHttpResponse. HttpVersion/HTTP_1_1 s Unpooled/EMPTY_BUFFER)]
@@ -299,8 +305,6 @@
       (do (log/debug "Please continue")
           (async/put! out {:ch (-> ctx .channel .id) :status 100})
           (responder opts)))
-          ; This would probably save a tiny amount of resources, but doesn't read from out-sub...
-          ;(respond! ctx keep-alive? (reuse :CONTINUE))))
     (.read ctx)))
 
 ; Interface graph:
@@ -323,12 +327,17 @@
     (set! (. DiskAttribute baseDirectory) nil)
     (proxy [SimpleChannelInboundHandler] [HttpObject]
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
-        (log/debug "Received a" (.toString obj))
-        ; FIXME defence against unwelcome requests (esp large PUT/POST)
+        (log/debug "Received" (.toString obj))
+
+        ; TODO *** defence against unwelcome requests (esp large PUT/POST)
+        ; Reject by default unless app says ok? Or dynamically set maximum-content-length?
+        ; Broader app-controlled "permit" function?
+        ; -> Could achieve by app unceremoniously evicting client on receipt of bad request?
+        ; Or politely responding with HttpResponseStatus, but how to interrupt abusive upload?
+        ; Would `respond!` turning off keep alive (if not OK or CONTINUE) terminate upload?
+        ; TODO test
+
         (when-let [^HttpRequest req (and (instance? HttpRequest obj) obj)]
-          (when-not (some-> req .headers (.get HttpHeaderNames/CONTENT_TYPE))
-            (-> req .headers (.set HttpHeaderNames/CONTENT_TYPE
-                               HttpHeaderValues/APPLICATION_OCTET_STREAM)))
           (let [decoder (try (HttpPostRequestDecoder. data-factory req)
                              (catch HttpPostRequestDecoder$ErrorDataDecoderException e
                                (log/warn "Error setting up POST decoder" e)
@@ -369,37 +378,49 @@
                     protocol (.protocolVersion req)
                       ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
                       #_ (some-> req .content)]
-                (if (async/put! in (->Request (-> ctx .channel .id)
-                                     (.toString protocol)
-                                     {:content-length (let [l (HttpUtil/getContentLength req (cast Long -1))]
-                                                        (when-not (neg? l) l))
-                                      :charset (HttpUtil/getCharset req)
-                                      :content-type (HttpUtil/getMimeType req)}
-                                     (-> req .method .toString str/lower-case keyword)
-                                     headers cookies (.uri req) (.path qsd) (.parameters qsd)))
-                  (responder opts)
+                (when-not (async/put! in
+                            (->Request (-> ctx .channel .id)
+                              (.toString protocol)
+                              {:content-length
+                               (let [l (HttpUtil/getContentLength req (cast Long -1))]
+                                 (when-not (neg? l) l))
+                               :charset (HttpUtil/getCharset req)
+                               :content-type (HttpUtil/getMimeType req)}
+                              (-> req .method .toString str/lower-case keyword)
+                              headers cookies (.uri req) (.path qsd) (.parameters qsd)))
                   (do (log/error "Dropped incoming http request because in chan is closed")
                       (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE)))))))
 
-        ; After https://github.com/netty/netty/blob/master/example/src/main/java/io/netty/example/http/upload/HttpUploadServerHandler.java
-        ; TODO wait and see if HPRD can actually handle PUT and POST
-        (when-let [^HttpPostRequestDecoder decoder (:decoder @state)]
-          (log/debug "decoding")
-          (when-let [^HttpContent con (and (instance? HttpContent obj) obj)]
-            (try (.offer decoder con)
-                 (catch HttpPostRequestDecoder$ErrorDataDecoderException e
-                   (log/warn "Error running POST decoder" e)
-                   (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
-            (read-chunkwise opts)
-            (when-let [^LastHttpContent con (and (instance? LastHttpContent obj) obj)]
-              (if (async/put! in (->Trail (-> ctx .channel .id)
-                                          #(.destroy decoder)
-                                          (-> con .trailingHeaders parse-headers :headers)))
-                (responder opts)
-                (do (.destroy decoder)
-                    (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself.")))))
-          (.read ctx))
-        (log/debug "End of http/handler. Did you read the next incoming message?"))
+        ; Started with https://github.com/netty/netty/blob/master/example/src/main/java/io/netty/example/http/upload/HttpUploadServerHandler.java
+
+        ; PUT and PATCH do work, but only if HttpHeaderValues/MULTIPART_FORM_DATA it seems
+        ; Not enough to have content-type and data stream (tries to parse as attribute).
+        ; This is probably ok; lots of benefit from HPRD's Mixed{Attribute,FileUpload} classes
+        ; (in-memory, switches to disk after disk-threshold).
+
+        ; TODO find right place for responder
+
+        (if-let [^HttpPostRequestDecoder decoder (:decoder @state)]
+          (do
+            (log/debug "decoding")
+            (when-let [^HttpContent con (and (instance? HttpContent obj) obj)]
+              (try (.offer decoder con)
+                   (catch HttpPostRequestDecoder$ErrorDataDecoderException e
+                     ; FIXME NPE with PUT x-url-encoded file... % curl ... -X PUT -d ...
+                     (log/warn "Error running POST decoder" (some->> e .getMessage (briefly 120)))
+                     (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
+              (read-chunkwise opts)
+              (when-let [^LastHttpContent con (and (instance? LastHttpContent obj) obj)]
+                (when-not (async/put! in
+                            (->Trail (-> ctx .channel .id)
+                                     #(.destroy decoder)
+                                     (-> con .trailingHeaders parse-headers :headers)))
+                  (.destroy decoder)
+                  (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself."))
+                (responder opts))))
+          (responder opts))
+        (.read ctx)
+        (log/debug "End of http/handler."))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
         (log/error "Error in http handler" cause)
         (some-> ^HttpPostRequestDecoder (:decoder @state) .destroy)

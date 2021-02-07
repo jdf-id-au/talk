@@ -49,7 +49,7 @@
 
 #_(defn echo [{:keys [in out]}]
     (go-loop [{:keys [channel file? value data value] :as msg} (<! in)]
-      (log/debug "RECEIVE" msg)
+      (log/debug "APP RECEIVED" msg)
       (when-let [res (condp instance? msg ; remember only one http response!
                        Connection nil
                        Trail nil
@@ -60,7 +60,7 @@
                        Text {:text data}
                        Binary {:binary data}
                        (log/error "Forgot about" (type msg) msg))]
-        (log/debug "SEND" res)
+        (log/debug "APP SENT" res)
         (when-not (>! out (assoc res :ch channel))
           (log/error "failed to write")))
       (when msg

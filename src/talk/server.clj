@@ -4,6 +4,7 @@
                                                   put! close! alt! alt!!]]
             [talk.http :as http]
             [talk.ws :as ws]
+            [talk.util :refer [on]]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen])
   (:import (io.netty.channel ChannelInitializer ChannelHandlerContext
@@ -21,8 +22,6 @@
            (java.net InetSocketAddress)
            (io.netty.util ReferenceCountUtil)
            (talk.http Request Attribute File Trail)))
-
-(def on #(.asShortText (:channel %)))
 
 (defrecord Connection [channel open?]
   Object (toString [r] (str "Channel " (on r) \  (if open? "opened" "closed"))))

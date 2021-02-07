@@ -4,7 +4,7 @@
   (:require [clojure.tools.logging :as log]
             [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close!]]
             [clojure.spec.alpha :as s]
-            #_[talk.server :as server :refer [ChannelInboundMessageHandler Aggregator accept]])
+            [talk.util :refer [on]])
   (:import (io.netty.channel ChannelHandlerContext
                              SimpleChannelInboundHandler ChannelFutureListener ChannelHandler)
            (io.netty.handler.codec.http.websocketx
@@ -14,11 +14,9 @@
 
 (s/def :plain/text string?)
 (s/def :plain/data bytes?)
-; TODO fix to match records
+; FIXME directionality
 (s/def ::text (s/keys :req-un [:talk.server/ch :plain/text]))
 (s/def ::binary (s/keys :req-un [:talk.server/ch :plain/data]))
-
-(def on #(.asShortText (:channel %)))
 
 (defrecord Text [channel data]
   Object
