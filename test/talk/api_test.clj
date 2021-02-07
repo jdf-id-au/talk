@@ -5,7 +5,10 @@
             [talk.api :as talk]
             [taoensso.timbre :as log]
             [talk.ws :as ws])
-  (:import (talk.ws Text Binary)))
+  (:import
+    (talk.server Connection)
+    (talk.http Request Attribute File Trail)
+    (talk.ws Text Binary)))
 
 (defonce server (atom nil))
 (defonce client (atom nil))
@@ -27,6 +30,11 @@
   (echo [this]))
 
 (extend-protocol Echo
+  Connection (echo [_])
+  Request (echo [_])
+  Attribute (echo [_])
+  File (echo [_])
+  Trail (echo [_])
   Text (echo [{:keys [channel data]}] {:ch channel :text data})
   Binary (echo [{:keys [channel data]}] {:ch channel :data data}))
 
@@ -37,16 +45,16 @@
   (<!! (go (if (>! (client :out) msg)
              (<! (go-loop [{:keys [data] :as msg} (<! (server :in))]
                    (log/info "Server received" (str msg))
-                   ; TODO probably should test connection notices too
-                   (if data ; clumsy way of restricting types
+                   (if-let [res (echo msg)]
                      (do
-                       (log/info "Trying to send" (str msg))
+                       (log/info "Trying to send")
                        (do (>! (server :out) (echo msg))
                            (alt! (async/timeout 1000) (do (log/info "timeout") ::timeout)
                                  (client :in) ([v] v))))
-                       ; drop connection/disconnection notices
-                       ; clearer with `go-loop` and `if` than xformed chan, `pipe` etc
-                     (recur (<! (server :in))))))
+                           ; NB websocket doesn't automatically get reply if too long etc
+                     (do
+                       (log/info "No echo defined")
+                       (recur (<! (server :in)))))))
              (log/warn "already closed")))))
 
 (deftest messages
@@ -54,7 +62,7 @@
         client @client
         client-id (-> @clients keys first)
         short-message "hello"
-        ; Can't actually get very near (* 1024 1024); presumably protocol overhead.
+        ; Can't actually get anywhere near (* 1024 1024); presumably protocol overhead.
         ; Hangs IDE when trying, annoyingly. TODO debug
         long-message (apply str (repeatedly (* 512 1024) #(char (rand-int 255))))]
     (is (contains? @clients client-id)) ; hard to imagine this failing, just for symmetry
