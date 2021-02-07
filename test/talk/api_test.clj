@@ -67,3 +67,8 @@
 #_ (@client :ws)
 #_ (hws/close! (@client :ws))
 #_ ((:close @server)) ; when tests crash
+
+; TODO test
+; - small & large file put/post/patch multipart form data (and urlencoded?)
+; - get
+; - binary ws

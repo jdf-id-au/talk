@@ -17,7 +17,7 @@
                                         HttpResponseStatus
                                         FullHttpResponse
                                         HttpHeaderNames QueryStringDecoder HttpResponse
-                                        HttpRequest HttpContent LastHttpContent HttpObject HttpVersion HttpHeaderValues HttpExpectationFailedEvent HttpMessage)
+                                        HttpRequest HttpContent LastHttpContent HttpObject HttpVersion HttpHeaderValues HttpExpectationFailedEvent HttpMessage FullHttpRequest)
            (io.netty.util CharsetUtil ReferenceCountUtil)
            (io.netty.handler.codec.http.cookie ServerCookieDecoder ServerCookieEncoder Cookie)
            (io.netty.handler.codec.http.multipart HttpPostRequestDecoder
@@ -112,7 +112,7 @@
 ; after https://netty.io/4.1/xref/io/netty/example/http/websocketx/server/WebSocketIndexPageHandler.html
 (defn respond!
   "Send HTTP response, and manage keep-alive and Content-Length.
-   Caller needs to fire channel read!"
+   Fires channel read (provides backpressure) on success if keep-alive."
   [^ChannelHandlerContext ctx keep-alive? ^FullHttpResponse res]
   (log/debug "Responding" res)
   (let [status (.status res)
@@ -122,9 +122,14 @@
     ; May need to review when enabling HttpContentEncoder etc. What about HTTP/2?
     (HttpUtil/setContentLength res (-> res .content .readableBytes))
     (let [cf (.writeAndFlush ctx res)]
-      (when-not keep-alive? (.addListener cf ChannelFutureListener/CLOSE)))))
+      (if keep-alive?
+        ; request-response backpressure!
+        (.addListener cf (reify ChannelFutureListener (operationComplete [_ _] (.read ctx))))
+        (.addListener cf ChannelFutureListener/CLOSE)))))
 
 (defn stream!
+  "Send HTTP response streaming a file, and manage keep-alive and content-length.
+   Fires channel read (provides backpressure) on success if keep-alive."
   [^ChannelHandlerContext ctx keep-alive? ^HttpResponse res ^java.io.File file]
    ; after https://github.com/datskos/ring-netty-adapter/blob/master/src/ring/adapter/plumbing.clj and current docs
   (assert (.isFile file))
@@ -144,15 +149,17 @@
     (when-not (.get hdrs HttpHeaderNames/CONTENT_TYPE)
       (some->> file .getName URLConnection/guessContentTypeFromName
         (.set hdrs HttpHeaderNames/CONTENT_TYPE)))
-    ; TODO backpressure?
     ; TODO trailing headers?
     (.writeAndFlush ctx res) ; initial line and header
     (let [cf (.writeAndFlush ctx region)] ; encoded into several HttpContents?
-      (when-not keep-alive? (.addListener cf ChannelFutureListener/CLOSE)))))
+      (if keep-alive?
+        ; request-response backpressure!
+        (.addListener cf (reify ChannelFutureListener (operationComplete [_ _] (.read ctx))))
+        (.addListener cf ChannelFutureListener/CLOSE)))))
 
 (defn responder
-  "Submit request to application and wait for its response, or timeout.
-   Fires channel read (provides backpressure)."
+  "Asynchronously submit request to application and wait for its response, or timeout.
+   Send application's response to client with a backpressure-maintaning effect function."
   [{:keys [clients handler-timeout state] :as opts}]
   (let [{:keys [^ChannelHandlerContext ctx ^HttpVersion protocol keep-alive?]} @state
         id (-> ctx .channel .id)
@@ -189,8 +196,7 @@
                 ; TODO need to support repeated headers (other than Set-Cookie ?)
                 (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
                   (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
-                (respond! ctx keep-alive? res)))
-            (.read ctx)) ; because autoRead is false
+                (respond! ctx keep-alive? res))))
           (do (log/error "Dropped incoming http request because of out chan timeout")
               (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE)))
         (catch Exception e
@@ -256,6 +262,7 @@
             (log/info "Dropped incoming POST data because unrecognised type"))))
       (when-let [^InterfaceHttpData data (.currentPartialHttpData decoder)]
         (log/debug "partial decoding")
+        (.read ctx)
         (when-not (:partial @state)
           (swap! state assoc :partial data)))
           ; TODO could do finer-grained logging/events etc
@@ -285,7 +292,7 @@
   (-> response status .retainedDuplicate))
 
 (defn manage-expectations
-  "Like HttpObjectAggregator, but only manages Expect: 100-continue."
+  "Like HttpObjectAggregator, but only manages expect: 100-continue."
   [{:keys [out state max-content-length] :as opts} req]
   (let [ctx ^ChannelHandlerContext (:ctx @state)
         p (.pipeline ctx)
@@ -304,8 +311,7 @@
       :else
       (do (log/debug "Please continue")
           (async/put! out {:ch (-> ctx .channel .id) :status 100})
-          (responder opts)))
-    (.read ctx)))
+          (responder opts)))))
 
 ; Interface graph:
 ;   HttpObject
@@ -338,25 +344,29 @@
         ; TODO test
 
         (when-let [^HttpRequest req (and (instance? HttpRequest obj) obj)]
-          (let [decoder (try (HttpPostRequestDecoder. data-factory req)
+          (when (instance? FullHttpRequest req)
+            (log/warn "Unexpectedly received FullHttpRequest. POST decoder might not work."))
+          (let [protocol (.protocolVersion req)
+                headers (.headers req)
+                keep-alive? (HttpUtil/isKeepAlive req)
+                ; Is a non-chunked request with content encoded to FullHttpRequest? Seems not?
+                chunked? (HttpUtil/isTransferEncodingChunked req)
+                decoder (try (HttpPostRequestDecoder. data-factory req)
                              (catch HttpPostRequestDecoder$ErrorDataDecoderException e
                                (log/warn "Error setting up POST decoder" e)
-                               (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
-                protocol (.protocolVersion req)]
+                               (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))]
             (swap! state assoc :decoder decoder :protocol protocol
               ; Move this to ->Request meta if want application to be able to manipulate keep-alive
-              :keep-alive? (HttpUtil/isKeepAlive req))
+              :keep-alive? keep-alive?)
             (cond
               (-> req .decoderResult .isSuccess not)
               (do (log/warn (-> req .decoderResult .cause .getMessage))
                   (code! ctx HttpResponseStatus/BAD_REQUEST))
 
-              (some-> req .headers (.get HttpHeaderNames/EXPECT)
-                (.equalsIgnoreCase (.toString HttpHeaderValues/CONTINUE)))
+              (.containsValue headers HttpHeaderNames/EXPECT HttpHeaderValues/CONTINUE true)
               (manage-expectations opts req)
 
-              (some-> req .headers (.get HttpHeaderNames/UPGRADE)
-                (.equalsIgnoreCase (.toString HttpHeaderValues/WEBSOCKET)))
+              (.containsValue headers HttpHeaderNames/UPGRADE HttpHeaderValues/WEBSOCKET true)
               (let [p (.pipeline ctx)]
                   ; This is probably unnecessary (and noop) because HttpRequest has no content
                   ; and so has no ByteBuf to pass back to pipeline!
@@ -376,18 +386,23 @@
               (let [qsd (-> req .uri QueryStringDecoder.)
                     {:keys [headers cookies]} (-> req .headers parse-headers)
                     protocol (.protocolVersion req)
+                    method (-> req .method .toString str/lower-case keyword)
                       ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
                       #_ (some-> req .content)]
-                (when-not (async/put! in
-                            (->Request (-> ctx .channel .id)
-                              (.toString protocol)
-                              {:content-length
-                               (let [l (HttpUtil/getContentLength req (cast Long -1))]
-                                 (when-not (neg? l) l))
-                               :charset (HttpUtil/getCharset req)
-                               :content-type (HttpUtil/getMimeType req)}
-                              (-> req .method .toString str/lower-case keyword)
-                              headers cookies (.uri req) (.path qsd) (.parameters qsd)))
+                (if (async/put! in
+                      (->Request (-> ctx .channel .id)
+                        (.toString protocol)
+                        {:content-length
+                         (let [l (HttpUtil/getContentLength req (cast Long -1))]
+                           (when-not (neg? l) l))
+                         :charset (HttpUtil/getCharset req)
+                         :content-type (HttpUtil/getMimeType req)}
+                        method
+                        headers cookies (.uri req) (.path qsd) (.parameters qsd)))
+                  ; TODO does a non-chunked request which has content still require a second read?
+                  ; also see above
+                  #_(when chunked? (.read ctx))
+                  (case method (:post :put :patch) (.read ctx) nil)
                   (do (log/error "Dropped incoming http request because in chan is closed")
                       (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE)))))))
 
@@ -401,9 +416,9 @@
         ; TODO find right place for responder
 
         (if-let [^HttpPostRequestDecoder decoder (:decoder @state)]
-          (do
-            (log/debug "decoding")
+          (let [cleanup (fn [] (.destroy decoder) (swap! state dissoc :decoder))]
             (when-let [^HttpContent con (and (instance? HttpContent obj) obj)]
+              (log/debug "decoding")
               (try (.offer decoder con)
                    (catch HttpPostRequestDecoder$ErrorDataDecoderException e
                      ; FIXME NPE with PUT x-url-encoded file... % curl ... -X PUT -d ...
@@ -412,14 +427,16 @@
               (read-chunkwise opts)
               (when-let [^LastHttpContent con (and (instance? LastHttpContent obj) obj)]
                 (when-not (async/put! in
-                            (->Trail (-> ctx .channel .id)
-                                     #(.destroy decoder)
+                            (->Trail (-> ctx .channel .id) cleanup
                                      (-> con .trailingHeaders parse-headers :headers)))
-                  (.destroy decoder)
+                  (cleanup)
                   (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself."))
                 (responder opts))))
           (responder opts))
-        (.read ctx)
+        ; FIXME isn't backpressure to read here
+        ; - if request + no decoder, then should be single object, read after app response sent?
+        ; - if request + decoder, then could be multiple objects, read to supply decoder and again after app response sent
+        ;(.read ctx)
         (log/debug "End of http/handler."))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
         (log/error "Error in http handler" cause)
