@@ -70,5 +70,6 @@
 
 ; TODO test
 ; - small & large file put/post/patch multipart form data (and urlencoded?)
+; - successive such requests on kept-alive channel
 ; - get
 ; - binary ws

@@ -54,6 +54,7 @@
   ; Copying means twice the memory is temporarily needed, until netty bytebuf released.
   ; Limited by needing to fit in (half of available) memory because of WebSocketFrameAggregator.
   ; Benefit is application not needing to worry about manual memory management...
+  ; Contemplate repurposing or reimplementing simpler MixedAttribute to aggregate to memory vs disk depending on size (and turning off WSFA)
   [{:keys [in clients] :as opts}]
   (log/debug "Starting ws handler with" opts)
   (proxy [SimpleChannelInboundHandler] [WebSocketFrame]

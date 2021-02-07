@@ -349,8 +349,6 @@
           (let [protocol (.protocolVersion req)
                 headers (.headers req)
                 keep-alive? (HttpUtil/isKeepAlive req)
-                ; Is a non-chunked request with content encoded to FullHttpRequest? Seems not?
-                chunked? (HttpUtil/isTransferEncodingChunked req)
                 decoder (try (HttpPostRequestDecoder. data-factory req)
                              (catch HttpPostRequestDecoder$ErrorDataDecoderException e
                                (log/warn "Error setting up POST decoder" e)
@@ -399,9 +397,6 @@
                          :content-type (HttpUtil/getMimeType req)}
                         method
                         headers cookies (.uri req) (.path qsd) (.parameters qsd)))
-                  ; TODO does a non-chunked request which has content still require a second read?
-                  ; also see above
-                  #_(when chunked? (.read ctx))
                   (case method (:post :put :patch) (.read ctx) nil)
                   (do (log/error "Dropped incoming http request because in chan is closed")
                       (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE)))))))
@@ -433,10 +428,6 @@
                   (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself."))
                 (responder opts))))
           (responder opts))
-        ; FIXME isn't backpressure to read here
-        ; - if request + no decoder, then should be single object, read after app response sent?
-        ; - if request + decoder, then could be multiple objects, read to supply decoder and again after app response sent
-        ;(.read ctx)
         (log/debug "End of http/handler."))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
         (log/error "Error in http handler" cause)
