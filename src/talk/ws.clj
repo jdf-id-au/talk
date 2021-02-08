@@ -14,15 +14,14 @@
 
 (s/def :plain/text string?)
 (s/def :plain/data bytes?)
-; FIXME directionality
-(s/def ::text (s/keys :req-un [:talk.server/ch :plain/text]))
-(s/def ::binary (s/keys :req-un [:talk.server/ch :plain/data]))
+(s/def ::Text (s/keys :req-un [:talk.server/ch :plain/text]))
+(s/def ::Binary (s/keys :req-un [:talk.server/ch :plain/data]))
 
-(defrecord Text [channel data]
+(defrecord Text [channel text]
   Object
   (toString [r]
-    (let [len (count data) long? (> len 10)]
-      (str "<Text \"" (if long? (str (subs data 0 10) "...") data)
+    (let [len (count text) long? (> len 10)]
+      (str "<Text \"" (if long? (str (subs text 0 10) "...") text)
         "\" (" len " chars) on " (on r) \>))))
 (defrecord Binary [channel data]
   Object

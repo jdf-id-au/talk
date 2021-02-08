@@ -39,7 +39,6 @@
 (defmethod message-type File [_] ::http/File)
 (defmethod message-type Trail [_] ::http/Trail)
 
-
 (defn track-channel
   "Register channel in `clients` map and report on `in` chan.
    Map entry is a map containing `type`, `out-sub` and `addr`, and can be updated.

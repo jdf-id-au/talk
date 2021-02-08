@@ -23,17 +23,16 @@
                       :timestamp-opts {:timezone (TimeZone/getDefault)}}))
 
 (set! *warn-on-reflection* true)
-
 (configure :debug)
 (add-tap pprint)
 
 #_(do
     (require '[talk.api :as talk]) ; delay netty noise until after logger configured
-    (import ; bad for reloading?
+    (import ; bad for reloadability
       (talk.server Connection)
       (talk.http Request Attribute File Trail)
       (talk.ws Text Binary)))
-
+    ; not working?
     ;(defmethod clojure.pprint/simple-dispatch Connection [_] prn)
     ;(defmethod clojure.pprint/simple-dispatch Request [_] prn)
     ;(defmethod clojure.pprint/simple-dispatch Attribute [_] prn)
@@ -47,7 +46,10 @@
     (>! out {:ch channel :status 200 :content value})
     (when msg (recur (<! in)))))
 
-#_(defn echo [{:keys [in out]}]
+#_(defn echo
+    "Attempt to echo incoming."
+    ; TODO exit-ch https://stackoverflow.com/a/53559455/780743
+    [{:keys [in out]}]
     (go-loop [{:keys [channel file? value data value] :as msg} (<! in)]
       (log/debug "APP RECEIVED" msg)
       (when-let [res (condp instance? msg ; remember only one http response!
@@ -70,9 +72,6 @@
 #_ (def s (talk/server! 8125 {:max-content-length (* 1 1024 1024) #_(* 5 1024 1024 1024)}))
 #_ (def echo-chan (echo s))
 #_ (inspect s)
-
-
-; TODO try closing echo channel
 
 ; Server application can internally publish `in` using topic extracted from @clients :type via <ChannelId>
 ; e.g. yielding {:ch <ChannelId> :method :get ...} for http

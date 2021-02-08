@@ -1,6 +1,10 @@
 (ns talk.util
   (:import (io.netty.channel ChannelId)))
 
+(defn retag
+  "spec convenience"
+  [gen-v tag] gen-v)
+
 (defn briefly
   "Truncate string"
   ([clip comment] (cond (nil? comment) nil

@@ -17,7 +17,8 @@
                                         HttpResponseStatus
                                         FullHttpResponse
                                         HttpHeaderNames QueryStringDecoder HttpResponse
-                                        HttpRequest HttpContent LastHttpContent HttpObject HttpVersion HttpHeaderValues HttpExpectationFailedEvent HttpMessage FullHttpRequest)
+                                        HttpRequest HttpContent LastHttpContent HttpObject HttpVersion
+                                        HttpHeaderValues HttpExpectationFailedEvent FullHttpRequest)
            (io.netty.util CharsetUtil ReferenceCountUtil)
            (io.netty.handler.codec.http.cookie ServerCookieDecoder ServerCookieEncoder Cookie)
            (io.netty.handler.codec.http.multipart HttpPostRequestDecoder
@@ -48,10 +49,9 @@
 (s/def ::path string?)
 (s/def ::query string?)
 (s/def ::parameters map?)
-; Permissive receive, doesn't enforce HTTP semantics
-(s/def ::Request ; capitalised because defrecord
-  (s/keys :req-un [:talk.server/ch ::protocol ::meta ::method ::headers ::cookies
-                   ::uri ::path ::query ::parameters]))
+; Permissive receive, doesn't enforce HTTP semantics; capitalised because defrecord
+(s/def ::Request (s/keys :req-un [:talk.server/ch ::protocol ::meta ::method ::headers ::cookies
+                                  ::uri ::path ::query ::parameters]))
 
 (s/def ::name string?)
 (s/def ::charset (s/with-gen (s/nilable #(instance? Charset %))
@@ -66,12 +66,11 @@
 (s/def ::transfer-encoding string?)
 
 (s/def ::Attribute (s/keys :req-un [:talk.server/ch ::name ::charset ::file? ::value]))
-(s/def ::File
-  (s/keys :req-un [:talk.server/ch ::name ::charset ::content-type ::transfer-encoding ::file? ::value]))
+(s/def ::File (s/keys :req-un [:talk.server/ch ::name ::charset ::content-type ::transfer-encoding
+                               ::file? ::value]))
 
 (s/def ::cleanup fn?)
-(s/def ::Trail
-  (s/keys :req-un [:talk.server/ch ::cleanup ::headers]))
+(s/def ::Trail (s/keys :req-un [:talk.server/ch ::cleanup ::headers]))
 
 (s/def ::status #{; See HttpResponseStatus
                   100 101 102 ; unlikely to use 100s at application level
@@ -407,8 +406,6 @@
         ; Not enough to have content-type and data stream (tries to parse as attribute).
         ; This is probably ok; lots of benefit from HPRD's Mixed{Attribute,FileUpload} classes
         ; (in-memory, switches to disk after disk-threshold).
-
-        ; TODO find right place for responder
 
         (if-let [^HttpPostRequestDecoder decoder (:decoder @state)]
           (let [cleanup (fn [] (.destroy decoder) (swap! state dissoc :decoder))]

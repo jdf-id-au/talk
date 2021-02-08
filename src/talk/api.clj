@@ -4,11 +4,11 @@
             [talk.server :as server]
             [talk.http :as http]
             [talk.ws :as ws]
+            [talk.util :refer [retag]]
             [hato.websocket :as hws]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen])
   (:import (io.netty.bootstrap ServerBootstrap)
-           (io.netty.channel ChannelId DefaultChannelId)
            (io.netty.channel.nio NioEventLoopGroup)
            (io.netty.channel.group DefaultChannelGroup)
            (io.netty.channel.socket.nio NioServerSocketChannel)
@@ -16,8 +16,6 @@
            (java.net InetSocketAddress)
            (io.netty.handler.codec.http.multipart DefaultHttpDataFactory)
            (io.netty.handler.codec.http HttpObjectDecoder)))
-
-(defn retag [gen-v tag] gen-v) ; copied from jdf/comfort for the moment
 
 (s/def ::incoming (s/multi-spec server/message-type retag))
 
