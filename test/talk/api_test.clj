@@ -35,7 +35,7 @@
   Attribute (echo [_])
   File (echo [_])
   Trail (echo [_])
-  Text (echo [{:keys [channel data]}] {:ch channel :text data})
+  Text (echo [{:keys [channel text]}] {:ch channel :text text})
   Binary (echo [{:keys [channel data]}] {:ch channel :data data}))
 
 (defn round-trip
