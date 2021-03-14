@@ -50,7 +50,7 @@
     "Attempt to echo incoming."
     ; TODO exit-ch https://stackoverflow.com/a/53559455/780743
     [{:keys [in out]}]
-    (go-loop [{:keys [channel file? value data value] :as msg} (<! in)]
+    (go-loop [{:keys [channel file? text data value] :as msg} (<! in)]
       (log/debug "APP RECEIVED" msg)
       (when-let [res (condp instance? msg ; remember only one http response!
                        Connection nil
@@ -59,7 +59,7 @@
                        File {:status 200 :content value}
                        Request {:status 200 :headers {"content-encoding" "text/plain"}
                                 :content (str msg)}
-                       Text {:text data}
+                       Text {:text text}
                        Binary {:binary data}
                        (log/error "Forgot about" (type msg) msg))]
         (log/debug "APP SENT" res)
