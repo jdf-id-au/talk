@@ -43,10 +43,7 @@
   [msg client server]
   (log/info "about to roundtrip" (count msg) "characters")
   (<!! (go (if (>! (client :out) msg)
-             (<! (go-loop [{:keys [data] :as msg}
-                           (alt! (async/timeout 1000)
-                                 (do (log/info "server receive timeout") ::timeout)
-                                 (server :in) ([v] v))]
+             (<! (go-loop [{:keys [data] :as msg} (<! (server :in))]
                    (case msg
                      ::timeout ::timeout
                      (do
@@ -61,7 +58,9 @@
                                ; NB websocket doesn't automatically get reply if too long etc
                          (do
                            (log/info "No echo defined")
-                           (recur (<! (server :in)))))))))
+                           (recur (alt! (async/timeout 1000)
+                                    (do (log/info "server receive timeout") ::timeout)
+                                    (server :in) ([v] v)))))))))
              (log/warn "already closed")))))
 
 (deftest messages
@@ -75,9 +74,7 @@
     (is (contains? @clients client-id)) ; hard to imagine this failing, just for symmetry
     (is (= short-message (round-trip short-message client server)))
     (is (= long-message (round-trip long-message client server)))
-    ; FIXME IDE hangs some time after both timeout! (subsequent tests pass)
-    ; Not shutting down tidily?
-    ; Interruptible by killing repl early?
+    ; Does IDE hang while trying to display certain (!) messages?
     (is (nil? (-> @clients keys first evict deref)))
     (is (not (contains? @clients client-id)))))
     ; TODO check for disconnection msg?
