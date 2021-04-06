@@ -34,7 +34,7 @@
 
 (defmulti message-type class)
 (defmethod message-type Connection [_] ::Connection)
-(defmethod message-type Request [_] ::http/request)
+(defmethod message-type Request [_] ::http/Request)
 (defmethod message-type Attribute [_] ::http/Attribute)
 (defmethod message-type File [_] ::http/File)
 (defmethod message-type Trail [_] ::http/Trail)

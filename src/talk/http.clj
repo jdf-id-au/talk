@@ -56,7 +56,7 @@
 (s/def ::name string?)
 (s/def ::charset (s/with-gen (s/nilable #(instance? Charset %))
                    #(gen/fmap (fn [^String s] (Charset/forName s))
-                      #{"ISO-8859-1" "UTF-8"})))
+                      (s/gen #{"ISO-8859-1" "UTF-8"}))))
 (s/def ::file? boolean?)
 (s/def ::file (s/with-gen #(instance? java.io.File %)
                 #(gen/fmap (fn [^String p] (java.io.File. p))
@@ -69,7 +69,7 @@
 (s/def ::File (s/keys :req-un [:talk.server/ch ::name ::charset ::content-type ::transfer-encoding
                                ::file? ::value]))
 
-(s/def ::cleanup fn?)
+(s/def ::cleanup (s/with-gen fn? #(gen/return any?)))
 (s/def ::Trail (s/keys :req-un [:talk.server/ch ::cleanup ::headers]))
 
 (s/def ::status #{; See HttpResponseStatus
@@ -85,6 +85,7 @@
 (s/def ::content (s/or ::file ::file ::string string? ::bytes bytes? ::nil nil?))
 ; TODO could enforce HTTP semantics in spec (e.g. (s/and ... checking-fn)
 ; (Some like CORS preflight might need to be stateful and therefore elsewhere... use Netty's impl!)
+; lowercase because no corresponding defrecord
 (s/def ::response (s/keys :req-un [::status] :opt-un [::headers ::cookies ::content]))
 
 (defrecord Request [channel protocol meta method headers cookies uri path parameters]
@@ -176,7 +177,7 @@
               (let [res (DefaultHttpResponse. protocol
                           (HttpResponseStatus/valueOf status))
                     hdrs (.headers res)]
-                (doseq [[k v] headers] (.set hdrs (name k) v))
+                (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
                 (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
                   (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
                 ; TODO trailing headers?

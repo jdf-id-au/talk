@@ -1,4 +1,5 @@
 (ns talk.util
+  "Edited highlights from jdf/comfort, to avoid dep."
   (:import (io.netty.channel ChannelId)))
 
 (defn retag

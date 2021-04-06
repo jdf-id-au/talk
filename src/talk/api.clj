@@ -20,11 +20,12 @@
 (s/def ::incoming (s/multi-spec server/message-type retag))
 
 (s/def ::outgoing (s/or ::http/response ::http/response
-                        ::ws/text ::ws/text
-                        ::ws/binary ::ws/binary))
+                        ::ws/text ::ws/Text
+                        ::ws/binary ::ws/Binary))
 
-#_ (s/exercise ::http/request)
+#_ (s/exercise ::http/Request)
 #_ (s/exercise ::outgoing)
+#_ (s/exercise ::incoming) ; FIXME have another look at retag and multi-spec (sub-specs work)
 
 (def defaults
   "Starts as `opts` and eventually becomes `channel-opts`.
@@ -72,7 +73,8 @@
                             ; TODO any need for separate parent and child groups?
                             (.group loop-group)
                             (.channel NioServerSocketChannel)
-                            (.localAddress ^int (InetSocketAddress. port))
+                            ; FIXME specify ip ? InetAddress/getLocalHost ?
+                            (.localAddress (InetSocketAddress. port))
                             (.childHandler (server/pipeline ws-path
                                              (assoc opts
                                                :channel-group channel-group
