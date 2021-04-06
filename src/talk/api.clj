@@ -20,8 +20,8 @@
 (s/def ::incoming (s/multi-spec server/message-type retag))
 
 (s/def ::outgoing (s/or ::http/response ::http/response
-                        ::ws/text ::ws/Text
-                        ::ws/binary ::ws/Binary))
+                        ::ws/Text ::ws/Text
+                        ::ws/Binary ::ws/Binary))
 
 #_ (s/exercise ::http/Request)
 #_ (s/exercise ::outgoing)
@@ -52,7 +52,6 @@
    Clients can be individually evicted (i.e. have their channel closed) using `evict` fn.
    Close server by calling `close`.
    Websocket path defaults to /ws. Doesn't support Server Sent Events or long polling at present."
-  ; TODO adjust messages to be suitable for spec conformation (see above)
   ([port] (server! port {}))
   ([port opts]
    (log/debug "Starting server with" opts)
@@ -67,7 +66,8 @@
          clients (atom {})
          in (chan in-buffer) ; messages to application from server's handlers
          out (chan out-buffer) ; messages from application
-         out-pub (async/pub out :ch) ; ...to server's handler for that netty channel
+         ; FIXME validate outgoing messages (without context) before publishing
+         out-pub (async/pub out :channel) ; ...to server's handler for that netty channel
          evict (fn [id] (some-> channel-group (.find id) .close))]
      (try (let [bootstrap (doto (ServerBootstrap.)
                             ; TODO any need for separate parent and child groups?

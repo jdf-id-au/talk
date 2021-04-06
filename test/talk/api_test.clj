@@ -35,8 +35,8 @@
   Attribute (echo [_])
   File (echo [_])
   Trail (echo [_])
-  Text (echo [{:keys [channel text]}] {:ch channel :text text})
-  Binary (echo [{:keys [channel data]}] {:ch channel :data data}))
+  Text (echo [this] this)
+  Binary (echo [this] this))
 
 (defn round-trip
   "Send message from client to server and back again."
@@ -48,19 +48,19 @@
                      ::timeout ::timeout
                      (do
                        (log/info "Server received" (str msg))
-                       (if-let [res (echo msg)]
+                       (if-let [res (try (echo msg)
+                                         (catch IllegalArgumentException e
+                                           (log/info "No echo defined" e)))]
                          (do
                            (log/info "Trying to send")
-                           (do (>! (server :out) (echo msg))
+                           (do (>! (server :out) res)
                                (alt! (async/timeout 1000)
                                      (do (log/info "client receive timeout") ::timeout)
                                      (client :in) ([v] v))))
                                ; NB websocket doesn't automatically get reply if too long etc
-                         (do
-                           (log/info "No echo defined")
-                           (recur (alt! (async/timeout 1000)
-                                    (do (log/info "server receive timeout") ::timeout)
-                                    (server :in) ([v] v)))))))))
+                         (recur (alt! (async/timeout 1000)
+                                  (do (log/info "server receive timeout") ::timeout)
+                                  (server :in) ([v] v))))))))
              (log/warn "already closed")))))
 
 (deftest messages

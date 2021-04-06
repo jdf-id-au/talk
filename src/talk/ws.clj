@@ -27,13 +27,34 @@
   Object
   (toString [r] (str "<Binary (" (alength data) " bytes on " (on r) \>)))
 
-(defn send! [^ChannelHandlerContext ctx out-sub {:keys [text data] :as msg}]
-  (if msg
+(defprotocol Unframe
+  (unframe [this id]))
+(defprotocol Frame
+  (frame [this]))
+(extend-protocol Unframe
+  TextWebSocketFrame
+  (unframe [this id] (->Text id (.text this)))
+  BinaryWebSocketFrame
+  (unframe [this id]
+    (let [content (.content this)
+          data (byte-array (.readableBytes content))]
+      (.getBytes content 0 data)
+      (->Binary id data))))
+(extend-protocol Frame
+  Text
+  (frame [this] (TextWebSocketFrame. ^String (:text this)))
+  Binary
+  (frame [this] (BinaryWebSocketFrame. (:data this))))
+
+(defn send! [^ChannelHandlerContext ctx out-sub msg]
+  (when msg ; async/take! passes nil if out-sub closed
     (let [ch (.channel ctx)
           id (.id ch)
-          fr   (cond text (TextWebSocketFrame. ^String text)
-                     data (BinaryWebSocketFrame. ^bytes data))]
-      (when fr
+          fr (try (frame msg)
+                  (catch IllegalArgumentException e
+                    (log/error "Unable to send this message type. Is it a record?" msg e)))
+          take! #(async/take! out-sub (partial send! ctx out-sub))]
+      (if fr
         (-> (.writeAndFlush ch fr)
             (.addListener
               (reify ChannelFutureListener
@@ -43,7 +64,8 @@
                   (when-not (.isSuccess f)
                     (log/error "Send error for" msg "to" id (.cause f)))
                   (log/info "ChannelFutureListener")
-                  (async/take! out-sub (partial send! ctx out-sub)))))))))) ; facilitate backpressure
+                  (take!))))) ; facilitate backpressure
+        (take!))))) ; even when previous message unsendable
 
 (defn ^ChannelHandler handler
   "Forward incoming text messages to `in`.
@@ -73,25 +95,18 @@
       #_(-> ctx .channel .config (.setAutoRead false))
       (let [ch (.channel ctx)
             id (.id ch)]
-        (condp instance? frame
-          TextWebSocketFrame
-          (let [text (.text ^TextWebSocketFrame frame)]
-            ; http://cdn.cognitect.com/presentations/2014/insidechannels.pdf
-            ; https://github.com/loganpowell/cljs-guides/blob/master/src/guides/core-async-basics.md
-            ; https://clojure.org/guides/core_async_go
-            ; put! will throw AssertionError if >1024 requests queue up
-            ; Netty prefers async everywhere, which is why I'm not using >!!
-            (when-not (put! in (->Text id text) #(if % (.read ctx)))
-              (log/error "Dropped incoming websocket message because in chan is closed" text)))
-              ; TODO do something about closed in chan? Shutdown?
-          BinaryWebSocketFrame
-          (let [content (.content frame)
-                data (byte-array (.readableBytes content))]
-            (.getBytes content 0 data)
-            (when-not (put! in (->Binary id data) #(if % (.read ctx)))
-              (log/error "Dropped incoming websocket message because in chan is closed" data)))
-          (do (log/info "Dropped incoming websocket message because unrecognised type")
-              (.read ctx)))))
+        (if-let [cnv (try (unframe frame id)
+                          (catch IllegalArgumentException e
+                            (log/info "Dropped incoming websocket message because unrecognised type")))]
+          ; http://cdn.cognitect.com/presentations/2014/insidechannels.pdf
+          ; https://github.com/loganpowell/cljs-guides/blob/master/src/guides/core-async-basics.md
+          ; https://clojure.org/guides/core_async_go
+          ; put! will throw AssertionError if >1024 requests queue up
+          ; Netty prefers async everywhere, which is why I'm not using >!!
+          (when-not (put! in cnv #(if % (.read ctx)))
+            (log/error "Dropped incoming websocket message because in chan is closed" cnv))
+            ; TODO do something about closed in chan? Shutdown?
+          (.read ctx))))
     (exceptionCaught [^ChannelHandlerContext ctx
                       ^Throwable cause]
       (condp instance? cause

@@ -101,7 +101,6 @@
 (defrecord Trail [channel cleanup headers]
   Object (toString [r] (str "<Cleanup " headers \>)))
 
-
 (defn code!
   "Send HTTP response with given status and empty content using HTTP/1.1 or given version."
   ([ctx status] (code! ctx HttpVersion/HTTP_1_1 status))
@@ -202,7 +201,6 @@
         (catch Exception e
           (log/error "Error in http response handler" e)
           (code! ctx protocol HttpResponseStatus/INTERNAL_SERVER_ERROR))))))
-
 
 (defn parse-headers
   "Return map containing maps of headers and cookies."
