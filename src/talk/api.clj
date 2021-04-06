@@ -27,6 +27,14 @@
 #_ (s/exercise ::outgoing)
 #_ (s/exercise ::incoming) ; FIXME have another look at retag and multi-spec (sub-specs work)
 
+; TODO: (see user.clj)
+; Give error if client tries to connect ws at wrong path
+; Routing entirely within application (bidi I guess)
+; HTTP basics - some in application; could plagiarise bits of Ring
+; spec all messages
+; vigorous benchmarking and stress testing
+; Do set up static file serving for convenience? Maybe just individual files?
+
 (def defaults
   "Starts as `opts` and eventually becomes `channel-opts`.
    A state map atom `:state` is added in channel-specific initialiser's initChannel.
