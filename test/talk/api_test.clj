@@ -2,6 +2,7 @@
   (:require [clojure.test :refer :all]
             [clojure.core.async :as async :refer [chan go go-loop thread >! <! >!! <!! alt!]]
             [hato.websocket :as hws]
+            [hato.client :as hc]
             [talk.api :as talk]
             [taoensso.timbre :as log]
             [talk.ws :as ws])
@@ -10,21 +11,24 @@
     (talk.http Request Attribute File Trail)
     (talk.ws Text Binary)))
 
-(defonce server (atom nil))
-(defonce client (atom nil))
+(defonce test-server (atom nil))
+(defonce test-clients (atom {:http nil :ws nil}))
 (def port 8124)
 
 (defn with-server [f]
-  (reset! server (talk/server! port))
+  (reset! test-server (talk/server! port))
   (f)
-  ((:close @server)))
+  ((:close @test-server)))
 
-(defn with-client [f]
-  (reset! client (talk/client! (str "ws://localhost:" port "/ws")))
+(defn with-clients [f]
+  (swap! test-clients assoc
+    :http (hc/build-http-client {})
+    :ws (talk/client! (str "ws://localhost:" port "/ws")))
   (f)
-  (hws/close! (@client :ws)))
+  (hws/close! (-> @test-clients :ws :ws))
+  (swap! test-clients dissoc :http :ws))
 
-(use-fixtures :once with-server with-client)
+(use-fixtures :once with-server with-clients)
 
 (defprotocol Echo
   (echo [this]))
@@ -63,9 +67,9 @@
                                   (server :in) ([v] v))))))))
              (log/warn "already closed")))))
 
-(deftest messages
-  (let [{:keys [clients port path close evict] :as server} @server
-        client @client
+(deftest websocket
+  (let [{:keys [clients port path close evict] :as server} @test-server
+        client (:ws @test-clients)
         client-id (-> @clients keys first)
         short-message "hello"
         ; Can't actually get anywhere near (* 1024 1024); presumably protocol overhead.
@@ -79,12 +83,17 @@
     (is (not (contains? @clients client-id)))))
     ; TODO check for disconnection msg?
 
-#_ (@client :ws)
-#_ (hws/close! (@client :ws))
-#_ ((:close @server)) ; when tests crash
+#_ (-> @test-clients :ws)
+#_ (hws/close! (-> @test-clients :ws :ws))
+#_ ((:close @test-server)) ; when tests crash
 
 ; TODO test
 ; - small & large file put/post/patch multipart form data (and urlencoded?)
 ; - successive such requests on kept-alive channel
 ; - get
 ; - binary ws
+
+(deftest http
+  (let [{:keys [clients port path close evict] :as server} @test-server
+        c (:http @test-clients)]
+    (is (nil? (hc/get "http://localhost:" port "/" #_{:http-client c})))))

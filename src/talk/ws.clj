@@ -14,8 +14,8 @@
 
 (s/def :plain/text string?)
 (s/def :plain/data bytes?)
-(s/def ::Text (s/keys :req-un [:talk.server/ch :plain/text]))
-(s/def ::Binary (s/keys :req-un [:talk.server/ch :plain/data]))
+(s/def ::Text (s/keys :req-un [:talk.server/channel :plain/text]))
+(s/def ::Binary (s/keys :req-un [:talk.server/channel :plain/data]))
 
 (defrecord Text [channel text]
   Object

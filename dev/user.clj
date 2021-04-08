@@ -4,9 +4,7 @@
              :refer [chan go go-loop thread >! <! >!! <!! alt! timeout]]
             [taoensso.timbre :as log]
             [clojure.pprint :refer [pprint]])
-  (:import (java.util TimeZone)
-           (talk.http Attribute)
-           (talk.ws Binary)))
+  (:import (java.util TimeZone)))
 
 (defn pprint-middleware
   "Middleware after https://github.com/ptaoussanis/timbre/issues/184#issuecomment-397421329"
@@ -58,7 +56,7 @@
     Attribute
     (response [this id] {:status 200 :content (:value this) :channel id})
     Request
-    (response [this id] {:status 200 :headers {"content-encoding" "text/plain"}
+    (response [this id] {:status 200 :headers {:content-encoding "text/plain"}
                          :content (str this) :channel id})
     Text
     (response [this _] this)

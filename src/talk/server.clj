@@ -27,10 +27,10 @@
   Object (toString [r] (str "Channel " (on r) \  (if open? "opened" "closed"))))
 
 (s/def ::open? boolean?)
-(s/def ::Connection (s/keys :req-un [::ch ::open?]))
+(s/def ::Connection (s/keys :req-un [::channel ::open?]))
 
-(s/def ::ch (s/with-gen #(instance? ChannelId %)
-              #(gen/fmap (fn [_] (DefaultChannelId/newInstance)) (s/gen nil?))))
+(s/def ::channel (s/with-gen #(instance? ChannelId %)
+                   #(gen/fmap (fn [_] (DefaultChannelId/newInstance)) (s/gen nil?))))
 
 (defmulti message-type class)
 (defmethod message-type Connection [_] ::Connection)

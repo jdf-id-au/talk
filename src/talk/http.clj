@@ -50,7 +50,7 @@
 (s/def ::query string?)
 (s/def ::parameters map?)
 ; Permissive receive, doesn't enforce HTTP semantics; capitalised because defrecord
-(s/def ::Request (s/keys :req-un [:talk.server/ch ::protocol ::meta ::method ::headers ::cookies
+(s/def ::Request (s/keys :req-un [:talk.server/channel ::protocol ::meta ::method ::headers ::cookies
                                   ::uri ::path ::query ::parameters]))
 
 (s/def ::name string?)
@@ -65,12 +65,12 @@
 (s/def ::content-type string?)
 (s/def ::transfer-encoding string?)
 
-(s/def ::Attribute (s/keys :req-un [:talk.server/ch ::name ::charset ::file? ::value]))
-(s/def ::File (s/keys :req-un [:talk.server/ch ::name ::charset ::content-type ::transfer-encoding
+(s/def ::Attribute (s/keys :req-un [:talk.server/channel ::name ::charset ::file? ::value]))
+(s/def ::File (s/keys :req-un [:talk.server/channel ::name ::charset ::content-type ::transfer-encoding
                                ::file? ::value]))
 
 (s/def ::cleanup (s/with-gen fn? #(gen/return any?)))
-(s/def ::Trail (s/keys :req-un [:talk.server/ch ::cleanup ::headers]))
+(s/def ::Trail (s/keys :req-un [:talk.server/channel ::cleanup ::headers]))
 
 (s/def ::status #{; See HttpResponseStatus
                   100 101 102 ; unlikely to use 100s at application level
@@ -152,7 +152,7 @@
     (.writeAndFlush ctx res) ; initial line and header
     (let [cf (.writeAndFlush ctx region)] ; encoded into several HttpContents?
       (if keep-alive?
-        ; request-response backpressure!
+        ; request-response backpressure! TODO is this desirable/correct?
         (.addListener cf (reify ChannelFutureListener (operationComplete [_ _] (.read ctx))))
         (.addListener cf ChannelFutureListener/CLOSE)))))
 

@@ -15,7 +15,8 @@
            (io.netty.util.concurrent GlobalEventExecutor)
            (java.net InetSocketAddress)
            (io.netty.handler.codec.http.multipart DefaultHttpDataFactory)
-           (io.netty.handler.codec.http HttpObjectDecoder)))
+           (io.netty.handler.codec.http HttpObjectDecoder)
+           (io.netty.channel ChannelFutureListener DefaultChannelId)))
 
 (s/def ::incoming (s/multi-spec server/message-type retag))
 
@@ -73,10 +74,25 @@
          ; also for administering sub(scription)s
          clients (atom {})
          in (chan in-buffer) ; messages to application from server's handlers
-         out (chan out-buffer) ; messages from application
-         ; FIXME validate outgoing messages (without context) before publishing
+         ; messages from application
+         ; TODO test how invalid messages tell application
+         out (chan out-buffer
+               (filter (fn [msg]
+                         (if (s/explain-data ::outgoing msg)
+                           ; FIXME not sure this actually gets out
+                           (log/error "Invalid outgoing message" msg)
+                           msg))))
          out-pub (async/pub out :channel) ; ...to server's handler for that netty channel
-         evict (fn [id] (some-> channel-group (.find id) .close))]
+         evict (fn [^DefaultChannelId id]
+                 (let [ast (.asShortText id)]
+                   (log/info "Trying to evict" ast (-> (get @clients id) (dissoc :out-sub)))
+                   (some-> channel-group (.find id) .close
+                     (.addListener
+                       (reify ChannelFutureListener
+                         (operationComplete [_ f]
+                           (if (.isSuccess f)
+                             (log/info "Evicted" ast)
+                             (log/warn "Couldn't evict" ast))))))))]
      (try (let [bootstrap (doto (ServerBootstrap.)
                             ; TODO any need for separate parent and child groups?
                             (.group loop-group)
