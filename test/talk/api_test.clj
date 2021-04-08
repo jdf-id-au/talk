@@ -35,7 +35,8 @@
 
 (extend-protocol Echo
   Connection (echo [_])
-  Request (echo [_])
+  Request (echo [this] {:status 200 :headers {:content-encoding "text/plain"}
+                        :content (str this) :channel (:channel this)})
   Attribute (echo [_])
   File (echo [_])
   Trail (echo [_])
@@ -47,7 +48,7 @@
   [msg client server]
   (log/info "about to roundtrip" (count msg) "characters")
   (<!! (go (if (>! (client :out) msg)
-             (<! (go-loop [{:keys [data] :as msg} (<! (server :in))]
+             (<! (go-loop [msg (<! (server :in))]
                    (case msg
                      ::timeout ::timeout
                      (do
@@ -93,7 +94,8 @@
 ; - get
 ; - binary ws
 
+; FIXME need to set up echo on server (see `user.clj`)... should probably arrange so works for ws too
 (deftest http
   (let [{:keys [clients port path close evict] :as server} @test-server
         c (:http @test-clients)]
-    (is (nil? (hc/get "http://localhost:" port "/" #_{:http-client c})))))
+    (is (nil? (hc/get (str "http://localhost:" port "/") #_{:http-client c})))))
