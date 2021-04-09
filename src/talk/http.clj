@@ -29,8 +29,17 @@
                                                   HttpPostRequestDecoder$EndOfDataDecoderException
                                                   InterfaceHttpData$HttpDataType FileUpload)
            (java.io RandomAccessFile)
-           (java.net URLConnection)
-           (java.nio.charset Charset)))
+           (java.net URLConnection InetSocketAddress)
+           (java.nio.charset Charset)
+           (io.netty.channel.group ChannelGroup)))
+
+(defrecord Connection [channel state]
+  Object (toString [r] (str "Channel " (on r) \  (case state :http "open for http"
+                                                             :ws "upgraded to ws"
+                                                             nil "closed"))))
+
+(s/def ::state #{:http :ws nil})
+(s/def ::Connection (s/keys :req-un [::channel ::state]))
 
 ; Bit redundant to spec incoming because Netty will have done some sanity checking.
 ; Still, good for clarity/gen/testing.
@@ -86,7 +95,9 @@
 ; TODO could enforce HTTP semantics in spec (e.g. (s/and ... checking-fn)
 ; (Some like CORS preflight might need to be stateful and therefore elsewhere... use Netty's impl!)
 ; lowercase because no corresponding defrecord
-(s/def ::response (s/keys :req-un [::status] :opt-un [::headers ::cookies ::content]))
+(s/def ::response (s/keys :req-un [::channel ::status] :opt-un [::headers ::cookies ::content]))
+
+
 
 (defrecord Request [channel protocol meta method headers cookies uri path parameters]
   Object (toString [r] (str \< (-> method name str/upper-case) \  uri " on channel " (on r) \>)))
@@ -100,6 +111,38 @@
 ; trailing headers ; NB if echoing file, should delay cleanup until fully sent
 (defrecord Trail [channel cleanup headers]
   Object (toString [r] (str "<Cleanup " headers \>)))
+
+(defn track-channel
+  "Register channel in `clients` map and report on `in` chan.
+   Map entry is a map containing `type`, `out-sub` and `addr`, and can be updated.
+
+   Usage:
+   - Call from channelActive.
+   - Detect websocket upgrade handshake, using userEventTriggered, and update `clients` map."
+  [{:keys [^ChannelGroup channel-group
+           state clients in out-pub]}]
+  (let [ctx ^ChannelHandlerContext (:ctx @state)
+        ch (.channel ctx)
+        id (.id ch)
+        cf (.closeFuture ch)
+        out-sub (chan)]
+    (try (.add channel-group ch)
+         (async/sub out-pub id out-sub)
+         (swap! clients assoc id
+           {:type :http ; changed in userEventTriggered
+            :out-sub out-sub
+            :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp)})
+         (when-not (put! in (->Connection id :http))
+           (log/error "Unable to report connection because in chan is closed"))
+         (.addListener cf
+           (reify ChannelFutureListener
+             (operationComplete [_ _]
+               (when-not (put! in (->Connection id nil))
+                 (log/error "Unable to report disconnection because in chan is closed"))
+               (swap! clients dissoc id))))
+         (catch Exception e
+           (log/error "Unable to register channel" ch e)
+           (throw e)))))
 
 (defn code!
   "Send HTTP response with given status and empty content using HTTP/1.1 or given version."

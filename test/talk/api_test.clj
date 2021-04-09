@@ -7,8 +7,7 @@
             [taoensso.timbre :as log]
             [talk.ws :as ws])
   (:import
-    (talk.server Connection)
-    (talk.http Request Attribute File Trail)
+    (talk.http Connection Request Attribute File Trail)
     (talk.ws Text Binary)))
 
 (defonce test-server (atom nil))
@@ -79,7 +78,7 @@
     (is (contains? @clients client-id)) ; hard to imagine this failing, just for symmetry
     (is (= short-message (round-trip short-message client server)))
     (is (= long-message (round-trip long-message client server)))
-    ; Does IDE hang while trying to display certain (!) messages?
+    ; Does IDE project window hang while trying to display certain (!) messages?
     (is (nil? (-> @clients keys first evict deref)))
     (is (not (contains? @clients client-id)))))
     ; TODO check for disconnection msg?
@@ -94,8 +93,17 @@
 ; - get
 ; - binary ws
 
-; FIXME need to set up echo on server (see `user.clj`)... should probably arrange so works for ws too
+(defn echo-server [{:keys [in out]}]
+  (go-loop [{:keys [channel] :as msg} (<! in)]
+    (if-let [res (some-> msg echo)]
+      (when-not (>! out res)
+        (log/error "failed to write" res "because port closed")))
+    (when msg
+      (recur (<! in)))))
+
+; FIXME could probably roll ws test into this echo server?
 (deftest http
   (let [{:keys [clients port path close evict] :as server} @test-server
-        c (:http @test-clients)]
-    (is (nil? (hc/get (str "http://localhost:" port "/") #_{:http-client c})))))
+        c (:http @test-clients)
+        echo-chan (echo-server server)]
+    (is (= 200 (:status (hc/get (str "http://localhost:" port "/") #_{:http-client c}))))))

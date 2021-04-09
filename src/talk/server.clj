@@ -7,8 +7,7 @@
             [talk.util :refer [on]]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen])
-  (:import (io.netty.channel ChannelInitializer ChannelHandlerContext
-                             ChannelFutureListener ChannelHandler
+  (:import (io.netty.channel ChannelInitializer ChannelHandlerContext ChannelHandler
                              SimpleChannelInboundHandler ChannelOption
                              ChannelId DefaultChannelId)
            (io.netty.channel.socket SocketChannel)
@@ -18,58 +17,21 @@
            (io.netty.handler.codec.http HttpUtil HttpObject)
            (io.netty.handler.codec.http.websocketx WebSocketServerProtocolHandler
                                                    WebSocketFrameAggregator)
-           (io.netty.channel.group ChannelGroup)
-           (java.net InetSocketAddress)
            (io.netty.util ReferenceCountUtil)
-           (talk.http Request Attribute File Trail)))
-
-(defrecord Connection [channel open?]
-  Object (toString [r] (str "Channel " (on r) \  (if open? "opened" "closed"))))
-
-(s/def ::open? boolean?)
-(s/def ::Connection (s/keys :req-un [::channel ::open?]))
+           (talk.http Connection Request Attribute File Trail)
+           (talk.ws Text Binary)))
 
 (s/def ::channel (s/with-gen #(instance? ChannelId %)
                    #(gen/fmap (fn [_] (DefaultChannelId/newInstance)) (s/gen nil?))))
 
 (defmulti message-type class)
-(defmethod message-type Connection [_] ::Connection)
+(defmethod message-type Connection [_] ::http/Connection)
 (defmethod message-type Request [_] ::http/Request)
 (defmethod message-type Attribute [_] ::http/Attribute)
 (defmethod message-type File [_] ::http/File)
 (defmethod message-type Trail [_] ::http/Trail)
-
-(defn track-channel
-  "Register channel in `clients` map and report on `in` chan.
-   Map entry is a map containing `type`, `out-sub` and `addr`, and can be updated.
-
-   Usage:
-   - Call from channelActive.
-   - Detect websocket upgrade handshake, using userEventTriggered, and update `clients` map."
-  [{:keys [^ChannelGroup channel-group
-           state clients in out-pub]}]
-  (let [ctx ^ChannelHandlerContext (:ctx @state)
-        ch (.channel ctx)
-        id (.id ch)
-        cf (.closeFuture ch)
-        out-sub (chan)]
-    (try (.add channel-group ch)
-         (async/sub out-pub id out-sub)
-         (swap! clients assoc id
-           {:type :http ; changed in userEventTriggered
-            :out-sub out-sub
-            :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp)})
-         (when-not (put! in (->Connection id true))
-           (log/error "Unable to report connection because in chan is closed"))
-         (.addListener cf
-           (reify ChannelFutureListener
-             (operationComplete [_ _]
-               (swap! clients dissoc id)
-               (when-not (put! in (->Connection id false))
-                 (log/error "Unable to report disconnection because in chan is closed")))))
-         (catch Exception e
-           (log/error "Unable to register channel" ch e)
-           (throw e)))))
+(defmethod message-type Text [_] ::ws/Text)
+(defmethod message-type Binary [_] ::ws/Binary)
 
 (defn ^ChannelHandler tracker
   [{:keys [state] :as opts}]
@@ -79,7 +41,7 @@
         ; Doesn't a given channel keep the same context instance,
         ; which is set by the pipeline in initChannel?
         (swap! state assoc :ctx ctx)
-        (track-channel opts)
+        (http/track-channel opts)
         (-> ctx .channel .config
               ; facilitate backpressure on subsequent reads; requires .read see branches below
           (-> (.setAutoRead false)

@@ -74,13 +74,13 @@
          ; also for administering sub(scription)s
          clients (atom {})
          in (chan in-buffer) ; messages to application from server's handlers
-         ; messages from application
-         ; TODO test how invalid messages tell application
-         out (chan out-buffer
-               (filter (fn [msg]
+         out (chan out-buffer ; messages from application
+               (filter (fn [{:keys [channel] :as msg}]
                          (if (s/explain-data ::outgoing msg)
-                           ; FIXME not sure this actually gets out
+                           ; FIXME not sure this actually gets to the log
                            (log/error "Invalid outgoing message" msg)
+                           ; TODO bad ::http/response -> 500 or something (and change filter to map)
+                           ;  but bad ::ws/... -> ??
                            msg))))
          out-pub (async/pub out :channel) ; ...to server's handler for that netty channel
          evict (fn [^DefaultChannelId id]
