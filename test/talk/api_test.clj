@@ -1,6 +1,6 @@
 (ns talk.api-test
   (:require [clojure.test :refer :all]
-            [clojure.core.async :as async :refer [chan go go-loop thread >! <! >!! <!! alt!]]
+            [clojure.core.async :as async :refer [chan go go-loop thread >! <! >!! <!! alt! alt!!]]
             [hato.websocket :as hws]
             [hato.client :as hc]
             [talk.api :as talk]
@@ -42,14 +42,9 @@
   Text (echo [this] (log/debug "Echoing text") this)
   Binary (echo [this] (log/debug "Echoing binary") this))
 
-#_ (-> @test-clients :ws)
-#_ (hws/close! (-> @test-clients :ws :ws))
-#_ ((:close @test-server)) ; when tests crash
-
 ; TODO test
 ; - small & large file put/post/patch multipart form data (and urlencoded?)
 ; - successive such requests on kept-alive channel
-; - binary ws
 
 (defn echo-application [{:keys [in out] :as server}]
   (go-loop [msg (<! in)]
@@ -64,9 +59,11 @@
         {:keys [http ws]} @test-clients ; opening ws client should actually connect to server
         ws-client-id (-> @clients keys first)
         _ (echo-application server)
+        ;read!! #(alt!! (ws :in) ([v] v) (async/timeout 100) nil) ; hangs whole IDE when trying to view error report?!
+        read!! #(<!! (ws :in)) ; just hangs REPL mid-test (still closable)
         short-text "hello"
+        ; FIXME
         ; Can't actually get anywhere near (* 1024 1024); presumably protocol overhead.
-        ; Hangs IDE when trying, annoyingly. TODO debug (closing channel for all exceps doesn't help)
         ; Interestingly binary over max-frame-size throws CorruptedWebSocketFrameException
         ; but oversized text doesn't?!
         ; Oversized text *message* throws TooLongFrameException...
@@ -79,11 +76,11 @@
       (is (= 200 (:status (hc/get (str "http://localhost:" port "/") {:http-client http})))
         "HTTP GET returns status 200."))
     (testing "ws"
-      (is (= short-text (when (async/put! (ws :out) short-text) (<!! (ws :in))))
+      (is (= short-text (when (async/put! (ws :out) short-text) (read!!)))
         "Short text WS roundtrip works.")
-      (is (= long-text (when (async/put! (ws :out) long-text) (<!! (ws :in))))
+      (is (= long-text (when (async/put! (ws :out) long-text) (read!!)))
         "Long text WS roundtrip works.")
-      (is (= (seq binary) (seq (when (async/put! (ws :out) binary) (<!! (ws :in)))))
+      (is (= (seq binary) (seq (when (async/put! (ws :out) binary) (read!!))))
         "Binary WS roundtrip works."))
     (is (nil? (-> ws-client-id evict deref))
       "(Evicting websocket client)")

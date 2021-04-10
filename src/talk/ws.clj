@@ -99,25 +99,31 @@
       #_(-> ctx .channel .config (.setAutoRead false))
       (let [ch (.channel ctx)
             id (.id ch)]
-        (if-let [cnv (try (unframe frame id)
+        (if-let [cnv (try (unframe frame id) ; Should already be aggregated
                           (catch IllegalArgumentException e
-                            (log/info "Dropped incoming websocket message because unrecognised type")))]
+                            (log/info "Dropped incoming websocket message because unrecognised type" e)))]
           ; http://cdn.cognitect.com/presentations/2014/insidechannels.pdf
           ; https://github.com/loganpowell/cljs-guides/blob/master/src/guides/core-async-basics.md
           ; https://clojure.org/guides/core_async_go
           ; put! will throw AssertionError if >1024 requests queue up
           ; Netty prefers async everywhere, which is why I'm not using >!!
           (when-not (put! in cnv #(if % (.read ctx)))
-            (log/error "Dropped incoming websocket message because in chan is closed" cnv))
+            (log/error "Dropped incoming websocket message because in chan is closed" cnv)
             ; TODO do something about closed in chan? Shutdown?
+            (.close ctx))
           (.read ctx))))
     (exceptionCaught [^ChannelHandlerContext ctx
                       ^Throwable cause]
       (condp instance? cause
         ; Actually when max *message* length is exceeded:
-        TooLongFrameException (log/warn (type cause) (.getMessage cause))
+        TooLongFrameException
+        (do (log/warn (type cause) (.getMessage cause))
+            ; unblock backpressure
+            (.read ctx))
         ; Max frame length exceeded:
-        CorruptedWebSocketFrameException (log/warn (type cause) (.getMessage cause))
+        CorruptedWebSocketFrameException
+        (do (log/warn (type cause) (.getMessage cause))
+            (.read ctx))
         ; else
         (do (log/error "Error in websocket handler" cause)
             (.close ctx))))))
