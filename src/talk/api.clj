@@ -16,7 +16,11 @@
            (java.net InetSocketAddress)
            (io.netty.handler.codec.http.multipart DefaultHttpDataFactory)
            (io.netty.handler.codec.http HttpObjectDecoder)
-           (io.netty.channel ChannelFutureListener DefaultChannelId)))
+           (io.netty.channel ChannelFutureListener DefaultChannelId)
+           (java.nio ByteBuffer)
+           (java.io ByteArrayOutputStream)
+           (java.nio.channels Channels WritableByteChannel))
+  (:refer-clojure :exclude [deliver]))
 
 (s/def ::incoming (s/multi-spec server/message-type retag))
 
@@ -124,17 +128,40 @@
             (log/error "Unable to bootstrap server" e)
             (throw e))))))
 
+(defprotocol Joinable
+  (append [this to]))
+(extend-protocol Joinable
+  CharSequence
+  (append [this ^StringBuilder to]
+    (.append (or to (StringBuilder.)) this))
+  ByteBuffer
+  (append [this ^ByteArrayOutputStream to]
+    (let [baos ^ByteArrayOutputStream (or to (ByteArrayOutputStream.))
+          ; Wasteful newChannel for every ByteBuffer but ReadOnlyBufferException trying to use .array
+          ; https://stackoverflow.com/a/579616/780743
+          ch (Channels/newChannel ^ByteArrayOutputStream baos)]
+      (.write ch this)
+      baos)))
+
+(defprotocol Deliverable
+  (deliver [this]))
+(extend-protocol Deliverable
+  StringBuilder
+  (deliver [this] (.toString this))
+  ByteArrayOutputStream
+  (deliver [this] (.toByteArray this)))
+
 ; TODO move hato dep to dev-only; just have client adaptor
 (defn client!
   [uri]
   (let [raw-in (chan)
         in (chan)
-        _ (go-loop [agg ""]
+        _ (go-loop [agg nil]
             (if-let [[frame last?] (<! raw-in)]
-              (let [ret (str agg frame)] ; TODO warn if large, abort if huge?
+              (let [ret (append frame agg)] ; TODO warn if large, abort if huge?
                 (if last?
-                  (if (>! in ret)
-                    (recur "")
+                  (if (>! in (deliver ret))
+                    (recur nil)
                     (log/error "Dropped incoming message because in chan is closed"))
                   (recur ret)))
               (log/warn "Aggregator chan is closed")))
@@ -147,6 +174,7 @@
                :on-close
                (fn [ws status reason]
                  ; Status codes https://tools.ietf.org/html/rfc6455#section-7.4.1
+                 ; and https://www.iana.org/assignments/websocket/websocket.xml
                  (log/info "Websocket closed" status reason))
                :on-error
                (fn [ws error]

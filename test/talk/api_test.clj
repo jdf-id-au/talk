@@ -4,11 +4,11 @@
             [hato.websocket :as hws]
             [hato.client :as hc]
             [talk.api :as talk]
-            [taoensso.timbre :as log]
-            [talk.ws :as ws])
+            [taoensso.timbre :as log])
   (:import
     (talk.http Connection Request Attribute File Trail)
-    (talk.ws Text Binary)))
+    (talk.ws Text Binary)
+    (java.nio ByteBuffer)))
 
 (defonce test-server (atom nil))
 (defonce test-clients (atom {:http nil :ws nil}))
@@ -22,7 +22,7 @@
 (defn with-clients [f]
   (swap! test-clients assoc
     :http (hc/build-http-client {})
-    :ws (talk/client! (str "ws://localhost:" port "/ws")))
+    :ws (talk/client! (str "ws://localhost:" port "/ws"))) ; opens a new http client first
   (f)
   (hws/close! (-> @test-clients :ws :ws))
   (swap! test-clients dissoc :http :ws))
@@ -39,49 +39,8 @@
   Attribute (echo [_])
   File (echo [_])
   Trail (echo [_])
-  Text (echo [this] this)
-  Binary (echo [this] this))
-
-(defn round-trip
-  "Send message from client to server and back again."
-  [msg client server]
-  (log/info "about to roundtrip" (count msg) "characters")
-  (<!! (go (if (>! (client :out) msg)
-             (<! (go-loop [msg (<! (server :in))]
-                   (case msg
-                     ::timeout ::timeout
-                     (do
-                       (log/info "Server received" (str msg))
-                       (if-let [res (try (echo msg)
-                                         (catch IllegalArgumentException e
-                                           (log/info "No echo defined" e)))]
-                         (do
-                           (log/info "Trying to send")
-                           (do (>! (server :out) res)
-                               (alt! (async/timeout 1000)
-                                     (do (log/info "client receive timeout") ::timeout)
-                                     (client :in) ([v] v))))
-                               ; NB websocket doesn't automatically get reply if too long etc
-                         (recur (alt! (async/timeout 1000)
-                                  (do (log/info "server receive timeout") ::timeout)
-                                  (server :in) ([v] v))))))))
-             (log/warn "already closed")))))
-
-(deftest websocket
-  (let [{:keys [clients port path close evict] :as server} @test-server
-        client (:ws @test-clients)
-        client-id (-> @clients keys first)
-        short-message "hello"
-        ; Can't actually get anywhere near (* 1024 1024); presumably protocol overhead.
-        ; Hangs IDE when trying, annoyingly. TODO debug
-        long-message (apply str (repeatedly (* 512 1024) #(char (rand-int 255))))]
-    (is (contains? @clients client-id)) ; hard to imagine this failing, just for symmetry
-    (is (= short-message (round-trip short-message client server)))
-    (is (= long-message (round-trip long-message client server)))
-    ; Does IDE project window hang while trying to display certain (!) messages?
-    (is (nil? (-> @clients keys first evict deref)))
-    (is (not (contains? @clients client-id)))))
-    ; TODO check for disconnection msg?
+  Text (echo [this] (log/debug "Echoing text") this)
+  Binary (echo [this] (log/debug "Echoing binary") this))
 
 #_ (-> @test-clients :ws)
 #_ (hws/close! (-> @test-clients :ws :ws))
@@ -90,20 +49,43 @@
 ; TODO test
 ; - small & large file put/post/patch multipart form data (and urlencoded?)
 ; - successive such requests on kept-alive channel
-; - get
 ; - binary ws
 
-(defn echo-server [{:keys [in out]}]
-  (go-loop [{:keys [channel] :as msg} (<! in)]
+(defn echo-application [{:keys [in out] :as server}]
+  (go-loop [msg (<! in)]
     (if-let [res (some-> msg echo)]
       (when-not (>! out res)
         (log/error "failed to write" res "because port closed")))
-    (when msg
+    (when msg ; will be nil if `in` is closed
       (recur (<! in)))))
 
-; FIXME could probably roll ws test into this echo server?
-(deftest http
+(deftest echo-test
   (let [{:keys [clients port path close evict] :as server} @test-server
-        c (:http @test-clients)
-        echo-chan (echo-server server)]
-    (is (= 200 (:status (hc/get (str "http://localhost:" port "/") #_{:http-client c}))))))
+        {:keys [http ws]} @test-clients ; opening ws client should actually connect to server
+        ws-client-id (-> @clients keys first)
+        _ (echo-application server)
+        short-text "hello"
+        ; Can't actually get anywhere near (* 1024 1024); presumably protocol overhead.
+        ; Hangs IDE when trying, annoyingly. TODO debug (closing channel for all exceps doesn't help)
+        ; Interestingly binary over max-frame-size throws CorruptedWebSocketFrameException
+        ; but oversized text doesn't?!
+        ; Oversized text *message* throws TooLongFrameException...
+        ; Something to do with client behaviour?
+        long-text (apply str (repeatedly (* 512 1024) #(char (rand-int 255))))
+        binary (byte-array (repeatedly (* 64 1024) #(rand-int 255)))]
+    (is (contains? @clients ws-client-id)
+      "Clients registry contains websocket client channel.")
+    (testing "http"
+      (is (= 200 (:status (hc/get (str "http://localhost:" port "/") {:http-client http})))
+        "HTTP GET returns status 200."))
+    (testing "ws"
+      (is (= short-text (when (async/put! (ws :out) short-text) (<!! (ws :in))))
+        "Short text WS roundtrip works.")
+      (is (= long-text (when (async/put! (ws :out) long-text) (<!! (ws :in))))
+        "Long text WS roundtrip works.")
+      (is (= (seq binary) (seq (when (async/put! (ws :out) binary) (<!! (ws :in)))))
+        "Binary WS roundtrip works."))
+    (is (nil? (-> ws-client-id evict deref))
+      "(Evicting websocket client)")
+    (is (not (contains? @clients ws-client-id))
+      "Client registry no longer contains websocket client channel.")))

@@ -11,7 +11,8 @@
            (io.netty.handler.codec.http.websocketx
              TextWebSocketFrame CorruptedWebSocketFrameException WebSocketFrame
              WebSocketServerProtocolHandler$HandshakeComplete BinaryWebSocketFrame)
-           (io.netty.handler.codec TooLongFrameException)))
+           (io.netty.handler.codec TooLongFrameException)
+           (io.netty.buffer Unpooled)))
 
 (s/def :plain/text string?)
 (s/def :plain/data bytes?)
@@ -30,8 +31,6 @@
 
 (defprotocol Unframe
   (unframe [this id]))
-(defprotocol Frame
-  (frame [this]))
 (extend-protocol Unframe
   TextWebSocketFrame
   (unframe [this id] (->Text id (.text this)))
@@ -41,11 +40,13 @@
           data (byte-array (.readableBytes content))]
       (.getBytes content 0 data)
       (->Binary id data))))
+(defprotocol Frame
+  (frame [this]))
 (extend-protocol Frame
   Text
   (frame [this] (TextWebSocketFrame. ^String (:text this)))
   Binary
-  (frame [this] (BinaryWebSocketFrame. (:data this))))
+  (frame [this] (BinaryWebSocketFrame. (Unpooled/wrappedBuffer ^bytes (:data this)))))
 
 (defn send! [^ChannelHandlerContext ctx out-sub msg]
   (when msg ; async/take! passes nil if out-sub closed
@@ -117,5 +118,6 @@
         TooLongFrameException (log/warn (type cause) (.getMessage cause))
         ; Max frame length exceeded:
         CorruptedWebSocketFrameException (log/warn (type cause) (.getMessage cause))
+        ; else
         (do (log/error "Error in websocket handler" cause)
             (.close ctx))))))
