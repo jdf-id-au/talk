@@ -71,7 +71,7 @@
 
 (defn ^ChannelHandler handler
   "Forward incoming text messages to `in`.
-   Send outgoing text messages from `out-sub`.
+   Send outgoing messages from `out-sub`.
    Both asynchronously and with backpressure."
   ; FIXME not taking advantage of zero-copy, but somewhat protected by backpressure.
   ; Copying means twice the memory is temporarily needed, until netty bytebuf released.

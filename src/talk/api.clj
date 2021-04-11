@@ -51,7 +51,8 @@
    :disk-threshold DefaultHttpDataFactory/MINSIZE
    ; WebSocket
    :handshake-timeout (* 5 1000) ; netty default not public
-   :max-frame-size (* 64 1024) :max-message-size (* 1024 1024)
+   :max-frame-size (* 64 1024)
+   :max-message-size (* 1024 1024)
    ; HTTP
    :max-chunk-size HttpObjectDecoder/DEFAULT_MAX_CHUNK_SIZE
    :max-content-length (* 1 1024 1024)}) ; limited to int range by netty!
@@ -79,10 +80,10 @@
          clients (atom {})
          in (chan in-buffer) ; messages to application from server's handlers
          out (chan out-buffer ; messages from application
-               (filter (fn [{:keys [channel] :as msg}]
-                         (if (s/explain-data ::outgoing msg)
+               (filter (fn [msg]
+                         (if-let [explanation (s/explain-data ::outgoing msg)]
                            ; FIXME not sure this actually gets to the log
-                           (log/error "Invalid outgoing message" msg)
+                           (log/error "Invalid outgoing message" msg explanation)
                            ; TODO bad ::http/response -> 500 or something (and change filter to map)
                            ;  but bad ::ws/... -> ??
                            msg))))

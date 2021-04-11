@@ -33,13 +33,12 @@
            (java.nio.charset Charset)
            (io.netty.channel.group ChannelGroup)))
 
+(s/def ::state #{:http :ws nil})
+(s/def ::Connection (s/keys :req-un [:talk.server/channel ::state]))
 (defrecord Connection [channel state]
   Object (toString [r] (str "Channel " (on r) \  (case state :http "open for http"
                                                              :ws "upgraded to ws"
                                                              nil "closed"))))
-
-(s/def ::state #{:http :ws nil})
-(s/def ::Connection (s/keys :req-un [::channel ::state]))
 
 ; Bit redundant to spec incoming because Netty will have done some sanity checking.
 ; Still, good for clarity/gen/testing.
@@ -51,16 +50,13 @@
 (s/def ::meta (s/keys :opt-un [::keep-alive?]))
 (s/def ::method #{:get :post :put :patch :delete :head :options :trace})
 (s/def ::headers (s/map-of keyword? ; TODO lower kw
-                   (s/or ::single string?
-                     ::multiple (s/coll-of string? :kind vector?))))
+                    (s/or ::single string?
+                      ::multiple (s/coll-of string? :kind vector?))))
 (s/def ::cookies (s/map-of string? string?))
 (s/def ::uri string?)
 (s/def ::path string?)
 (s/def ::query string?)
 (s/def ::parameters map?)
-; Permissive receive, doesn't enforce HTTP semantics; capitalised because defrecord
-(s/def ::Request (s/keys :req-un [:talk.server/channel ::protocol ::meta ::method ::headers ::cookies
-                                  ::uri ::path ::query ::parameters]))
 
 (s/def ::name string?)
 (s/def ::charset (s/with-gen (s/nilable #(instance? Charset %))
@@ -74,12 +70,8 @@
 (s/def ::content-type string?)
 (s/def ::transfer-encoding string?)
 
-(s/def ::Attribute (s/keys :req-un [:talk.server/channel ::name ::charset ::file? ::value]))
-(s/def ::File (s/keys :req-un [:talk.server/channel ::name ::charset ::content-type ::transfer-encoding
-                               ::file? ::value]))
-
 (s/def ::cleanup (s/with-gen fn? #(gen/return any?)))
-(s/def ::Trail (s/keys :req-un [:talk.server/channel ::cleanup ::headers]))
+
 
 (s/def ::status #{; See HttpResponseStatus
                   100 101 102 ; unlikely to use 100s at application level
@@ -94,23 +86,27 @@
 (s/def ::content (s/or ::file ::file ::string string? ::bytes bytes? ::nil nil?))
 ; TODO could enforce HTTP semantics in spec (e.g. (s/and ... checking-fn)
 ; (Some like CORS preflight might need to be stateful and therefore elsewhere... use Netty's impl!)
-; lowercase because no corresponding defrecord
-(s/def ::response (s/keys :req-un [::channel ::status] :opt-un [::headers ::cookies ::content]))
+; lowercase because no corresponding record because unnecessary
+(s/def ::response (s/keys :req-un [:talk.server/channel ::status] :opt-un [::headers ::cookies ::content]))
 
-
-
+; Permissive receive, doesn't enforce HTTP semantics; capitalised because defrecord
+(s/def ::Request (s/keys :req-un [:talk.server/channel ::protocol ::meta ::method ::headers ::cookies
+                                  ::uri ::path ::query ::parameters]))
 (defrecord Request [channel protocol meta method headers cookies uri path parameters]
   Object (toString [r] (str \< (-> method name str/upper-case) \  uri " on channel " (on r) \>)))
 ; file? explains whether value will be bytes or File
 ; keep charset as java.nio.Charset because convenient for decoding
+(s/def ::Attribute (s/keys :req-un [:talk.server/channel ::name ::charset ::file? ::value]))
 (defrecord Attribute [channel name charset file? value]
   Object (toString [r] (str "<Attribute " name \  (when file? "written to disk") " from " (on r) \>)))
 ; TODO support PUT and PATCH ->File
+(s/def ::File (s/keys :req-un [:talk.server/channel ::name ::charset ::content-type ::transfer-encoding ::file? ::value]))
 (defrecord File [channel name charset content-type transfer-encoding file? value]
-  Object (toString [r] (str "<FileUpload " name \  (when file? "written to disk") " from " (on r) \>)))
+  Object (toString [r] (str "<File " name \  (when file? "written to disk") " from " (on r) \>)))
 ; trailing headers ; NB if echoing file, should delay cleanup until fully sent
+(s/def ::Trail (s/keys :req-un [:talk.server/channel ::cleanup ::headers]))
 (defrecord Trail [channel cleanup headers]
-  Object (toString [r] (str "<Cleanup " headers \>)))
+  Object (toString [r] (str "<Trail " headers \>)))
 
 (defn track-channel
   "Register channel in `clients` map and report on `in` chan.
@@ -137,9 +133,8 @@
          (.addListener cf
            (reify ChannelFutureListener
              (operationComplete [_ _]
-               (when-not (put! in (->Connection id nil))
-                 (log/error "Unable to report disconnection because in chan is closed"))
-               (swap! clients dissoc id))))
+               (when-not (put! in (->Connection id nil) (fn [_] (swap! clients dissoc id)))
+                 (log/error "Unable to report disconnection because in chan is closed")))))
          (catch Exception e
            (log/error "Unable to register channel" ch e)
            (throw e)))))
@@ -205,42 +200,49 @@
   [{:keys [clients handler-timeout state] :as opts}]
   (let [{:keys [^ChannelHandlerContext ctx ^HttpVersion protocol keep-alive?]} @state
         id (-> ctx .channel .id)
-        out-sub (get-in @clients [id :out-sub])]
+        closed (chan)
+        _ (async/close! closed)
+        out-sub (get-in @clients [id :out-sub] closed)] ; default to closed chan if out-sub closed
     (go
       (try
-        (if-let [{:keys [status headers cookies content] :as res}
-                 ; Fetch application message published to this channel
-                 (alt! out-sub ([v] v) (async/timeout handler-timeout) nil)]
-          (do
-            (log/debug "Trying to send" res)
-            (if (instance? java.io.File content)
-              ; TODO add support for other streaming sources (use protocols?)
-              ; Streaming:
-              (let [res (DefaultHttpResponse. protocol
-                          (HttpResponseStatus/valueOf status))
-                    hdrs (.headers res)]
-                (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
-                (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
-                  (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
-                ; TODO trailing headers?
-                (stream! ctx keep-alive? res content))
-              ; Non-streaming:
-              (let [buf (condp #(%1 %2) content
-                         string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
-                         nil? Unpooled/EMPTY_BUFFER
-                         bytes? (Unpooled/copiedBuffer ^bytes content))
-                    res (DefaultFullHttpResponse. ; needed protocol hinted to resolve?
-                          protocol
-                          (HttpResponseStatus/valueOf status)
-                          ^ByteBuf buf)
-                    hdrs (.headers res)]
-                (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
-                ; TODO need to support repeated headers (other than Set-Cookie ?)
-                (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
-                  (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
-                (respond! ctx keep-alive? res))))
-          (do (log/error "Dropped incoming http request because of out chan timeout")
-              (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE)))
+        (let [{:keys [status headers cookies content] :as res}
+              ; Fetch application message published to this channel
+              (alt! out-sub ([v] v) (async/timeout handler-timeout) ::timeout)]
+          (case res
+            ::timeout
+            (do (log/error "Dropped incoming http request because of out chan timeout")
+                (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE))
+            nil
+            (do (log/warn "Dropped incoming http request because out chan closed")
+                (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE))
+            (do
+              (log/debug "Trying to send" res)
+              (if (instance? java.io.File content)
+                ; TODO add support for other streaming sources (use protocols?)
+                ; Streaming:
+                (let [res (DefaultHttpResponse. protocol
+                            (HttpResponseStatus/valueOf status))
+                      hdrs (.headers res)]
+                  (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
+                  (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
+                    (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
+                  ; TODO trailing headers?
+                  (stream! ctx keep-alive? res content))
+                ; Non-streaming:
+                (let [buf (condp #(%1 %2) content
+                           string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
+                           nil? Unpooled/EMPTY_BUFFER
+                           bytes? (Unpooled/copiedBuffer ^bytes content))
+                      res (DefaultFullHttpResponse. ; needed protocol hinted to resolve?
+                            protocol
+                            (HttpResponseStatus/valueOf status)
+                            ^ByteBuf buf)
+                      hdrs (.headers res)]
+                  (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
+                  ; TODO need to support repeated headers (other than Set-Cookie ?)
+                  (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
+                    (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
+                  (respond! ctx keep-alive? res))))))
         (catch Exception e
           (log/error "Error in http response handler" e)
           (code! ctx protocol HttpResponseStatus/INTERNAL_SERVER_ERROR))))))
@@ -407,13 +409,16 @@
 
               (.containsValue headers HttpHeaderNames/UPGRADE HttpHeaderValues/WEBSOCKET true)
               (let [p (.pipeline ctx)]
-                  ; This is probably unnecessary (and noop) because HttpRequest has no content
-                  ; and so has no ByteBuf to pass back to pipeline!
-                  (ReferenceCountUtil/retain req)
-                  (log/debug "Passing ws upgrade request through http/handler.")
-                  ; Remove self from pipeline for this channel!
-                  (.remove p "http-handler")
-                  (.fireChannelRead ctx req))
+                (if (.get p "ws")
+                  (do ; This is probably unnecessary (and noop) because HttpRequest has no content
+                      ; and so has no ByteBuf to pass back to pipeline!
+                      (ReferenceCountUtil/retain req)
+                      (log/debug "Passing ws upgrade request through http/handler.")
+                      ; Remove self from pipeline for this channel!
+                      (.remove p "http-handler")
+                      (.fireChannelRead ctx req))
+                  (do (log/debug "Dropped ws upgrade request because no ws configured.")
+                      (.close ctx))))
 
                ; (cast Long 0) worked but (long 0) didn't! maybe...
                ; https://stackoverflow.com/questions/12586881/clojure-overloaded-method-resolution-for-longs
@@ -429,15 +434,13 @@
                       ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
                       #_ (some-> req .content)]
                 (if (async/put! in
-                      (->Request (-> ctx .channel .id)
-                        (.toString protocol)
+                      (->Request (-> ctx .channel .id) (.toString protocol)
                         {:content-length
                          (let [l (HttpUtil/getContentLength req (cast Long -1))]
                            (when-not (neg? l) l))
                          :charset (HttpUtil/getCharset req)
                          :content-type (HttpUtil/getMimeType req)}
-                        method
-                        headers cookies (.uri req) (.path qsd) (.parameters qsd)))
+                        method headers cookies (.uri req) (.path qsd) (.parameters qsd)))
                   (case method (:post :put :patch) (.read ctx) nil)
                   (do (log/error "Dropped incoming http request because in chan is closed")
                       (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE)))))))

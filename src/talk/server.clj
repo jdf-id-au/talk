@@ -74,16 +74,18 @@
           #_(.addLast "http-compr" (HttpContentCompressor.))
           #_(.addLast "http-decompr" (HttpContentDecompressor.))
           (.addLast "streamer" (ChunkedWriteHandler.))
-          (.addLast "http-handler" (http/handler channel-opts))
-          ; Needed for WebSocketServerProtocolHandler but not wanted for http/handler
-          ; (so HttpPostRequestDecoder streams properly)
-          ; so need to pass through ws upgrade requests...
-          (.addLast "http-agg" (HttpObjectAggregator. max-content-length))
-          #_(.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions
-          (.addLast "ws" (WebSocketServerProtocolHandler.
-                           ; TODO [application] could specify subprotocol?
-                           ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
-                           ws-path nil true max-frame-size handshake-timeout))
-          ; TODO replace with functionality in main handler (e.g. via disk if big)
-          (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
-          (.addLast "ws-handler" (ws/handler channel-opts)))))))
+          (.addLast "http-handler" (http/handler channel-opts)))
+        (when ws-path
+          (doto (.pipeline ch)
+            ; Needed for WebSocketServerProtocolHandler but not wanted for http/handler
+            ; (so HttpPostRequestDecoder streams properly)
+            ; so need to pass through ws upgrade requests...
+            (.addLast "http-agg" (HttpObjectAggregator. max-content-length))
+            #_(.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions
+            (.addLast "ws" (WebSocketServerProtocolHandler.
+                             ; TODO [application] could specify subprotocol?
+                             ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
+                             ws-path nil true max-frame-size handshake-timeout))
+            ; TODO replace with functionality in main handler (e.g. via disk if big)
+            (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
+            (.addLast "ws-handler" (ws/handler channel-opts))))))))
