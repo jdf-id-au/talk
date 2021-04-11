@@ -15,7 +15,7 @@
 (def port 8124)
 
 (defn with-server [f]
-  (reset! test-server (talk/server! port))
+  (reset! test-server (talk/server! port {:ws-path "/ws"}))
   (f)
   ((:close @test-server)))
 

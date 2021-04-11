@@ -34,19 +34,33 @@
 
 ; TODO: (see user.clj)
 ; Give error if client tries to connect ws at wrong path
-; Routing entirely within application (bidi I guess)
-; HTTP basics - some in application; could plagiarise bits of Ring
-; spec all messages
+; Routing and much http entirely within next layer up, e.g. jdf/foundation
 ; vigorous benchmarking and stress testing
-; Do set up static file serving for convenience? Maybe just individual files?
+
+(s/def ::ws-path (s/and string? #(re-matches #"/.*" %))) ; TODO refine
+(s/def ::in-buffer pos-int?)
+(s/def ::out-buffer pos-int?)
+(s/def ::timeout (s/int-in 10 10000))
+(s/def ::handler-timeout ::timeout)
+(s/def ::disk-threshold (s/int-in 1024 (* 1024 1024)))
+(s/def ::handshake-timeout ::timeout)
+(s/def ::max-frame-size (s/int-in (* 32 1024) (* 1024 1024)))
+(s/def ::max-message-size (s/int-in (* 32 1024) (* 1024 1024 1024))) ; TODO cover with tests....
+(s/def ::max-chunk-size (s/int-in 1024 (* 1024 1024)))
+(s/def ::max-content-length (s/int-in (* 32 1024) (* 1024 1024 1024)))
+(s/def ::opts (s/keys :req-un [::in-buffer ::out-buffer ::handler-timeout
+                               ::disk-threshold
+                               ::handshake-timeout ::max-frame-size ::max-message-size
+                               ::max-chunk-size ::max-content-length]
+                :opt-un [::ws-path]))
 
 (def defaults
   "Starts as `opts` and eventually becomes `channel-opts`.
+   Need to add :ws-path if want websocket.
    A state map atom `:state` is added in channel-specific initialiser's initChannel.
    State will include a reference to Netty's ChannelHandlerContext `:ctx`, added in channel-specific handler's channelActive."
-  ; TODO spec opts (and follow through!) probably need real config system
   {; Toplevel
-   :ws-path "/ws" :in-buffer 1 :out-buffer 1 :handler-timeout (* 5 1000)
+   :in-buffer 1 :out-buffer 1 :handler-timeout (* 5 1000)
    ; Aggregation
    :disk-threshold DefaultHttpDataFactory/MINSIZE
    ; WebSocket
@@ -65,11 +79,16 @@
    Clients are tracked in `clients` atom which contains a map of ChannelId -> arbitrary metadata map.
    Clients can be individually evicted (i.e. have their channel closed) using `evict` fn.
    Close server by calling `close`.
-   Websocket path defaults to /ws. Doesn't support Server Sent Events or long polling at present."
+   Specify websocket path with :ws-path opt. No ws if  not specified.
+   Doesn't support Server Sent Events or long polling at present."
   ([port] (server! port {}))
   ([port opts]
    (log/debug "Starting server with" opts)
-   (let [{:keys [ws-path in-buffer out-buffer] :as opts} (merge defaults opts)
+   (let [merged-opts (merge defaults opts)
+         {:keys [ws-path in-buffer out-buffer] :as opts}
+         (if-let [explanation (s/explain-data ::opts merged-opts)]
+           (throw (ex-info "Invalid opts" {:defaults defaults :opts opts :explanation explanation}))
+           merged-opts)
          ; TODO look at aleph for epoll, thread number specification
          loop-group (NioEventLoopGroup.)
          ; single threaded executor is for group actions

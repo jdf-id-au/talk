@@ -183,15 +183,17 @@
         hdrs (.headers res)]
     (HttpUtil/setKeepAlive res keep-alive?)
     (HttpUtil/setContentLength res len)
-    (when-not (.get hdrs HttpHeaderNames/CONTENT_TYPE)
-      (some->> file .getName URLConnection/guessContentTypeFromName
-        (.set hdrs HttpHeaderNames/CONTENT_TYPE)))
+    #_(when-not (.get hdrs HttpHeaderNames/CONTENT_TYPE)
+        (some->> file .getName URLConnection/guessContentTypeFromName ; this is pretty weak
+          (.set hdrs HttpHeaderNames/CONTENT_TYPE)))
     ; TODO trailing headers?
     (.writeAndFlush ctx res) ; initial line and header
     (let [cf (.writeAndFlush ctx region)] ; encoded into several HttpContents?
       (if keep-alive?
         ; request-response backpressure! TODO is this desirable/correct?
-        (.addListener cf (reify ChannelFutureListener (operationComplete [_ _] (.read ctx))))
+        (.addListener cf (reify ChannelFutureListener (operationComplete [_ _]
+                                                        (.close raf)
+                                                        (.read ctx))))
         (.addListener cf ChannelFutureListener/CLOSE)))))
 
 (defn responder
@@ -472,6 +474,8 @@
           (responder opts))
         (log/debug "End of http/handler."))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
-        (log/error "Error in http handler" cause)
+        (case (.getMessage cause)
+          "Connection reset by peer" (log/info cause)
+          (log/error "Error in http handler" cause))
         (some-> ^HttpPostRequestDecoder (:decoder @state) .destroy)
         (.close ctx)))))
