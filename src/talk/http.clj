@@ -170,7 +170,7 @@
   [^ChannelHandlerContext ctx keep-alive? ^HttpResponse res ^java.io.File file]
    ; after https://github.com/datskos/ring-netty-adapter/blob/master/src/ring/adapter/plumbing.clj and current docs
   (assert (.isFile file))
-  (log/debug "Streaming" res)
+  (log/debug "Streaming" (.toString res))
   (let [status (.status res)
         ok? (= status HttpResponseStatus/OK)
         keep-alive? (and keep-alive? ok?)
@@ -370,7 +370,7 @@
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
   ; TODO read about HTTP/2 https://developers.google.com/web/fundamentals/performance/http2
   [{:keys [state in disk-threshold max-content-length] :as opts}]
-  (log/debug "Starting http handler with" opts)
+  (log/debug "Starting http handler")
   (let [data-factory (DefaultHttpDataFactory. ^long disk-threshold)]
     (set! (. DiskFileUpload deleteOnExitTemporaryFile) true) ; same as default
     (set! (. DiskFileUpload baseDirectory) nil) ; system temp directory

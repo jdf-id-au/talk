@@ -79,7 +79,7 @@
   ; Benefit is application not needing to worry about manual memory management...
   ; Contemplate repurposing or reimplementing simpler MixedAttribute to aggregate to memory vs disk depending on size (and turning off WSFA)
   [{:keys [in clients] :as opts}]
-  (log/debug "Starting ws handler with" opts)
+  (log/debug "Starting ws handler")
   (proxy [SimpleChannelInboundHandler] [WebSocketFrame]
     (userEventTriggered [^ChannelHandlerContext ctx evt]
       ; TODO propagate other user events?
