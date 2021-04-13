@@ -7,7 +7,7 @@
             [clojure.string :as str]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
-            [talk.util :refer [on briefly]])
+            [talk.util :refer [on briefly ess]])
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
                              ChannelHandlerContext ChannelFutureListener
@@ -186,15 +186,18 @@
     #_(when-not (.get hdrs HttpHeaderNames/CONTENT_TYPE)
         (some->> file .getName URLConnection/guessContentTypeFromName ; this is pretty weak
           (.set hdrs HttpHeaderNames/CONTENT_TYPE)))
-    ; TODO trailing headers?
     (.writeAndFlush ctx res) ; initial line and header
     (let [cf (.writeAndFlush ctx region)] ; encoded into several HttpContents?
-      (if keep-alive?
-        ; request-response backpressure! TODO is this desirable/correct?
-        (.addListener cf (reify ChannelFutureListener (operationComplete [_ _]
-                                                        (.close raf)
-                                                        (.read ctx))))
-        (.addListener cf ChannelFutureListener/CLOSE)))))
+      (.addListener cf
+        (reify ChannelFutureListener
+          (operationComplete [_ _]
+            (.close raf)
+            ; Omission of LastHttpContent causes inability to reuse channel. Safari and wget just close channel and try again, firefox and chrome get upset.
+            (.writeAndFlush ctx (LastHttpContent/EMPTY_LAST_CONTENT))
+            ; request-response backpressure! TODO is this desirable/correct?
+            (when keep-alive? (.read ctx))
+            (log/debug "Finished streaming" (ess res)
+              "on" (ess ctx) (when-not keep-alive? ", about to close because not keep-alive"))))))))
 
 (defn responder
   "Asynchronously submit request to application and wait for its response, or timeout.
@@ -218,7 +221,7 @@
             (do (log/warn "Dropped incoming http request because out chan closed")
                 (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE))
             (do
-              (log/debug "Trying to send" res)
+              #_(log/debug "Trying to send" (ess res))
               (if (instance? java.io.File content)
                 ; TODO add support for other streaming sources (use protocols?)
                 ; Streaming:
@@ -228,7 +231,6 @@
                   (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
                   (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
                     (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
-                  ; TODO trailing headers?
                   (stream! ctx keep-alive? res content))
                 ; Non-streaming:
                 (let [buf (condp #(%1 %2) content
@@ -378,7 +380,7 @@
     (set! (. DiskAttribute baseDirectory) nil)
     (proxy [SimpleChannelInboundHandler] [HttpObject]
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
-        (log/debug "Received" (.toString obj))
+        #_(log/debug "Received" (ess obj) "on" (ess (-> ctx .channel .id)))
 
         ; TODO *** defence against unwelcome requests (esp large PUT/POST)
         ; Reject by default unless app says ok? Or dynamically set maximum-content-length?
@@ -457,7 +459,7 @@
         (if-let [^HttpPostRequestDecoder decoder (:decoder @state)]
           (let [cleanup (fn [] (.destroy decoder) (swap! state dissoc :decoder))]
             (when-let [^HttpContent con (and (instance? HttpContent obj) obj)]
-              (log/debug "decoding")
+              #_(log/debug "decoding")
               (try (.offer decoder con)
                    (catch HttpPostRequestDecoder$ErrorDataDecoderException e
                      ; FIXME NPE with PUT x-url-encoded file... % curl ... -X PUT -d ...
@@ -472,7 +474,7 @@
                   (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself."))
                 (responder opts))))
           (responder opts))
-        (log/debug "End of http/handler."))
+        #_(log/debug "End of http/handler."))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
         (case (.getMessage cause)
           "Connection reset by peer" (log/info cause)
