@@ -199,10 +199,11 @@
               "on" (ess ctx) (when-not keep-alive? ", about to close because not keep-alive"))))))))
 
 (defn responder
-  "Asynchronously submit request to application and wait for its response, or timeout.
+  "Asynchronously wait for application's response, or timeout.
    Send application's response to client with a backpressure-maintaning effect function."
   [{:keys [clients handler-timeout] :as opts} id]
   (let [{:keys [^ChannelHandlerContext ctx ^HttpVersion protocol keep-alive?]} (get @clients id)
+        protocol (or protocol HttpVersion/HTTP_1_1)
         closed (chan)
         _ (async/close! closed)
         out-sub (get-in @clients [id :out-sub] closed)] ; default to closed chan if out-sub closed
@@ -219,31 +220,34 @@
             (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE
               :warn "Sent no http response because out chan closed")
             (do
+              ; TODO fire context read here for put/post/patch IF applications accepts e.g. 102?
               #_(log/debug "Trying to send" (ess res))
-              (if (instance? java.io.File content)
-                ; TODO add support for other streaming sources (use protocols?)
-                ; Streaming:
-                (let [res (DefaultHttpResponse. protocol (HttpResponseStatus/valueOf status))
-                      hdrs (.headers res)]
-                  (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
-                  (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
-                    (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
-                  (stream! ctx keep-alive? res content))
-                ; Non-streaming:
-                (let [buf (condp #(%1 %2) content
-                           string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
-                           nil? Unpooled/EMPTY_BUFFER
-                           bytes? (Unpooled/copiedBuffer ^bytes content))
-                      res (DefaultFullHttpResponse. ; needed protocol hinted to resolve?
-                            protocol
-                            (HttpResponseStatus/valueOf status)
-                            ^ByteBuf buf)
-                      hdrs (.headers res)]
-                  (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
-                  ; TODO need to support repeated headers (other than Set-Cookie ?)
-                  (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
-                    (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
-                  (respond! ctx keep-alive? res))))))
+              (case status 102
+                (.read ctx) ; and don't actually `respond!`
+                (if (instance? java.io.File content)
+                  ; TODO add support for other streaming sources (use protocols?)
+                  ; Streaming:
+                  (let [res (DefaultHttpResponse. protocol (HttpResponseStatus/valueOf status))
+                        hdrs (.headers res)]
+                    (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
+                    (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
+                      (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
+                    (stream! ctx keep-alive? res content))
+                  ; Non-streaming:
+                  (let [buf (condp #(%1 %2) content
+                             string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
+                             nil? Unpooled/EMPTY_BUFFER
+                             bytes? (Unpooled/copiedBuffer ^bytes content))
+                        res (DefaultFullHttpResponse. ; needed protocol hinted to resolve?
+                              protocol
+                              (HttpResponseStatus/valueOf status)
+                              ^ByteBuf buf)
+                        hdrs (.headers res)]
+                    (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
+                    ; TODO need to support repeated headers (other than Set-Cookie ?)
+                    (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
+                      (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
+                    (respond! ctx keep-alive? res)))))))
         (catch Exception e
           (code! ctx protocol HttpResponseStatus/INTERNAL_SERVER_ERROR
             :error "Error in http response handler" e))))))
@@ -312,7 +316,7 @@
       (catch HttpPostRequestDecoder$EndOfDataDecoderException e
         (log/info (type e) (some->> e .getMessage (briefly 120)))))))
 
-(defmulti ask-to
+(defmulti ask-to ; FIXME all pretty procedural and not unit testable... rely on integration tests?
   "Deny HTTP request? Allows unacceptable requests to be stopped in flight, e.g. to prevent
    abusive POST. Application could customise by redefining method?"
   (fn [task opts ctx req] task))
@@ -324,7 +328,9 @@
       (code! ctx protocol HttpResponseStatus/EXPECTATION_FAILED :info "Wrong HTTP version")
       (code! ctx protocol HttpResponseStatus/CONTINUE :debug "Please continue"))))
 
-(defmethod ask-to ::ws-upgrade
+(defmethod ask-to ::ws-upgrade ; FIXME only open ws door after http auth?
+  ; Concept is "may the user on channel x (with channel-meta as noted)
+  ; upgrade to websocket at path z?"
   [_ {:keys [ws-path] :as opts} ^ChannelHandlerContext ctx ^HttpRequest req]
   (let [p (.pipeline ctx)
         protocol (.protocolVersion req)
@@ -347,15 +353,17 @@
         {:keys [headers cookies]} (-> req .headers parse-headers)
         protocol (.protocolVersion req)
         method (-> req .method .toString str/lower-case keyword)]
-    (if (async/put! in
-          (->Request (-> ctx .channel .id) (.toString protocol)
-            {:content-length
-             (let [l (HttpUtil/getContentLength req (cast Long -1))]
-               (when-not (neg? l) l))
-             :charset (HttpUtil/getCharset req)
-             :content-type (HttpUtil/getMimeType req)}
-           method headers cookies (.uri req) (.path qsd) (.parameters qsd)))
-      (case method (:post :put :patch) (.read ctx) nil)
+    (if-not (async/put! in
+              (->Request (-> ctx .channel .id) (.toString protocol)
+                {:content-length
+                 (let [l (HttpUtil/getContentLength req (cast Long -1))]
+                   (when-not (neg? l) l))
+                 :charset (HttpUtil/getCharset req)
+                 :content-type (HttpUtil/getMimeType req)}
+               method headers cookies (.uri req) (.path qsd) (.parameters qsd)))
+      ; TODO Application can send 102 (to out chan, not client) if happy to receive post/put/patch
+      ; This causes (.read ctx) in `responder`... might not be kosher?
+      ; https://stackoverflow.com/questions/18367824
       (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE
         :error "Dropped incoming http request because in chan is closed"))))
 

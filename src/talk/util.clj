@@ -31,4 +31,6 @@
   ;HttpResponse
   ;(ess [this] ())
   Object
-  (ess [this] (.toString this)))
+  (ess [this] (.toString this))
+  nil
+  (ess [this] "nil?!"))
