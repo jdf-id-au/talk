@@ -8,8 +8,7 @@
             [taoensso.timbre :as log])
   (:import
     (talk.http Connection Request Attribute File Trail)
-    (talk.ws Text Binary)
-    (java.nio ByteBuffer)))
+    (talk.ws Text Binary)))
 
 (defonce test-server (atom nil))
 (defonce test-clients (atom {:http nil :ws nil}))

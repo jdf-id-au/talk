@@ -138,13 +138,6 @@
            (log/error "Unable to register channel" ch e)
            (throw e)))))
 
-(defn code!
-  "Send HTTP response with given status and empty content using HTTP/1.1 or given version."
-  ([ctx status] (code! ctx HttpVersion/HTTP_1_1 status))
-  ([^ChannelHandlerContext ctx ^HttpVersion version ^HttpResponseStatus status]
-   (-> (.writeAndFlush ctx (DefaultFullHttpResponse. version status Unpooled/EMPTY_BUFFER))
-       (.addListener ChannelFutureListener/CLOSE))))
-
 ; after https://netty.io/4.1/xref/io/netty/example/http/websocketx/server/WebSocketIndexPageHandler.html
 (defn respond!
   "Send HTTP response, and manage keep-alive and Content-Length.
@@ -152,6 +145,7 @@
   [^ChannelHandlerContext ctx keep-alive? ^FullHttpResponse res]
   (log/debug "Responding in" (ess ctx) "with" (ess res))
   (let [status (.status res)
+        ; TODO do any other codes merit keep-alive?
         ok-or-continue? (contains? #{HttpResponseStatus/OK HttpResponseStatus/CONTINUE} status)
         keep-alive? (and keep-alive? ok-or-continue?)]
     (HttpUtil/setKeepAlive res keep-alive?)
@@ -162,6 +156,15 @@
         ; request-response backpressure!
         (.addListener cf (reify ChannelFutureListener (operationComplete [_ _] (.read ctx))))
         (.addListener cf ChannelFutureListener/CLOSE)))))
+
+(defn code!
+  "Send HTTP response with gives status and empty content using HTTP/1.1 or given version."
+  ; TODO should probably pass through request's keep-alive...
+  ([ctx status level msg] (code! ctx HttpVersion/HTTP_1_1 status level msg nil))
+  ([ctx version status level msg] (code! ctx version status level msg nil))
+  ([ctx ^HttpVersion v ^HttpResponseStatus s level msg e]
+   (log/logp level msg e)
+   (respond! ctx true (DefaultFullHttpResponse. v s Unpooled/EMPTY_BUFFER))))
 
 (defn stream!
   "Send HTTP response streaming a file, and manage keep-alive and content-length.
@@ -210,11 +213,11 @@
               (alt! out-sub ([v] v) (async/timeout handler-timeout) ::timeout)]
           (case res
             ::timeout
-            (do (log/error "Sent no http response because of out chan timeout")
-                (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE))
+            (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE
+              :error "Sent no http response because of out chan timeout")
             nil
-            (do (log/warn "Sent no http response because out chan closed")
-                (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE))
+            (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE
+              :warn "Sent no http response because out chan closed")
             (do
               #_(log/debug "Trying to send" (ess res))
               (if (instance? java.io.File content)
@@ -242,8 +245,8 @@
                     (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
                   (respond! ctx keep-alive? res))))))
         (catch Exception e
-          (log/error "Error in http response handler" e)
-          (code! ctx protocol HttpResponseStatus/INTERNAL_SERVER_ERROR))))))
+          (code! ctx protocol HttpResponseStatus/INTERNAL_SERVER_ERROR
+            :error "Error in http response handler" e))))))
 
 (defn parse-headers
   "Return map containing maps of headers and cookies."
@@ -309,49 +312,52 @@
       (catch HttpPostRequestDecoder$EndOfDataDecoderException e
         (log/info (type e) (some->> e .getMessage (briefly 120)))))))
 
-(defn dfhr [^HttpResponseStatus s & {:as headers}]
-  (let [r (DefaultFullHttpResponse. HttpVersion/HTTP_1_1 s Unpooled/EMPTY_BUFFER)]
-    (doseq [[k v] headers] (-> r .headers (.set ^CharSequence k ^Object v)))
-    r))
+(defmulti ask-to
+  "Deny HTTP request? Allows unacceptable requests to be stopped in flight, e.g. to prevent
+   abusive POST. Application could customise by redefining method?"
+  (fn [task opts ctx req] task))
 
-(def response
-  {:EXPECTATION_FAILED
-    (dfhr HttpResponseStatus/EXPECTATION_FAILED
-     HttpHeaderNames/CONTENT_LENGTH 0)
-   :CONTINUE
-    (dfhr HttpResponseStatus/CONTINUE)
-   :TOO_LARGE
-    (dfhr HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE
-     HttpHeaderNames/CONTENT_LENGTH 0)
-   :TOO_LARGE_CLOSE
-    (dfhr HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE
-     HttpHeaderNames/CONTENT_LENGTH 0
-     HttpHeaderNames/CONNECTION HttpHeaderValues/CLOSE)})
+(defmethod ask-to ::continue
+  [_ opts ^ChannelHandlerContext ctx ^HttpRequest req]
+  (let [protocol (.protocolVersion req)]
+    (if (< 0 (.compareTo protocol HttpVersion/HTTP_1_1))
+      (code! ctx protocol HttpResponseStatus/EXPECTATION_FAILED :info "Wrong HTTP version")
+      (code! ctx protocol HttpResponseStatus/CONTINUE :debug "Please continue"))))
 
-(defn reuse [status]
-  (-> response status .retainedDuplicate))
+(defmethod ask-to ::ws-upgrade
+  [_ {:keys [ws-path] :as opts} ^ChannelHandlerContext ctx ^HttpRequest req]
+  (let [p (.pipeline ctx)
+        protocol (.protocolVersion req)
+        path (-> req .uri QueryStringDecoder. .path)]
+    (if ws-path
+      (if (= path ws-path)
+        (do ; This is probably unnecessary (and noop) because HttpRequest has no content
+            ; and so has no ByteBuf to pass back to pipeline!
+            (ReferenceCountUtil/retain req)
+            (.remove p "http-handler")
+            (.fireChannelRead ctx req))
+        (code! ctx protocol HttpResponseStatus/BAD_REQUEST
+          :into (str "Wrong WS path " path)))
+      (code! ctx protocol HttpResponseStatus/BAD_REQUEST
+        :info (str "No WS configured " path)))))
 
-(defn manage-expectations
-  "Like HttpObjectAggregator, but only manages expect: 100-continue."
-  [{:keys [out clients max-content-length] :as opts} id req]
-  (let [ctx ^ChannelHandlerContext (get-in @clients [id :ctx])
-        p (.pipeline ctx)
-        keep-alive? (HttpUtil/isKeepAlive req)]
-    (cond
-      (-> req .protocolVersion (.compareTo HttpVersion/HTTP_1_1) (< 0))
-      (do (log/debug "Wrong HTTP version")
-          (.fireUserEventTriggered p HttpExpectationFailedEvent/INSTANCE)
-          (respond! ctx keep-alive? (reuse :EXPECTATION_FAILED)))
-
-      (> (HttpUtil/getContentLength req (cast Long 0)) max-content-length)
-      (do (log/debug "Too large")
-          (.fireUserEventTriggered p HttpExpectationFailedEvent/INSTANCE)
-          (respond! ctx keep-alive? (reuse :TOO_LARGE)))
-
-      :else
-      (do (log/debug "Please continue")
-          (async/put! out {:ch id :status 100})
-          (responder opts id)))))
+(defmethod ask-to ::receive
+  [_ {:keys [in] :as opts} ^ChannelHandlerContext ctx ^HttpRequest req]
+  (let [qsd (-> req .uri QueryStringDecoder.)
+        {:keys [headers cookies]} (-> req .headers parse-headers)
+        protocol (.protocolVersion req)
+        method (-> req .method .toString str/lower-case keyword)]
+    (if (async/put! in
+          (->Request (-> ctx .channel .id) (.toString protocol)
+            {:content-length
+             (let [l (HttpUtil/getContentLength req (cast Long -1))]
+               (when-not (neg? l) l))
+             :charset (HttpUtil/getCharset req)
+             :content-type (HttpUtil/getMimeType req)}
+           method headers cookies (.uri req) (.path qsd) (.parameters qsd)))
+      (case method (:post :put :patch) (.read ctx) nil)
+      (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE
+        :error "Dropped incoming http request because in chan is closed"))))
 
 ; Interface graph:
 ;   HttpObject
@@ -364,7 +370,7 @@
 (defn ^ChannelHandler handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
   ; TODO read about HTTP/2 https://developers.google.com/web/fundamentals/performance/http2
-  [{:keys [clients in disk-threshold max-content-length] :as opts}]
+  [{:keys [clients in disk-threshold max-content-length ws-path] :as opts}]
   #_(log/debug "Starting http handler")
   (let [data-factory (DefaultHttpDataFactory. ^long disk-threshold)]
     (set! (. DiskFileUpload deleteOnExitTemporaryFile) true) ; same as default
@@ -374,6 +380,9 @@
     (proxy [SimpleChannelInboundHandler] [HttpObject]
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
         #_(log/debug "Received" (ess obj) "on" (ess (-> ctx .channel .id)))
+
+        ; Provide default `permit` fn which app can override which looks at client map
+        ; and decides whether to allow certain things
 
         ; TODO *** defence against unwelcome requests (esp large PUT/POST)
         ; Reject by default unless app says ok? Or dynamically set maximum-content-length?
@@ -393,58 +402,35 @@
                   keep-alive? (HttpUtil/isKeepAlive req)
                   decoder (try (HttpPostRequestDecoder. data-factory req)
                                (catch HttpPostRequestDecoder$ErrorDataDecoderException e
-                                 (log/warn "Error setting up POST decoder" e)
-                                 (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))]
+                                 (code! ctx protocol HttpResponseStatus/UNPROCESSABLE_ENTITY
+                                   :warn "Error setting up POST decoder" e)))]
               ; Move this to ->Request meta if want application to be able to manipulate keep-alive
               (swap! clients update id assoc :decoder decoder :protocol protocol :keep-alive? keep-alive?)
               (cond
                 (-> req .decoderResult .isSuccess not)
-                (do (log/warn (-> req .decoderResult .cause .getMessage))
-                    (code! ctx HttpResponseStatus/BAD_REQUEST))
+                (code! ctx HttpResponseStatus/BAD_REQUEST
+                  :warn (-> req .decoderResult .cause .getMessage))
+
+                (> (HttpUtil/getContentLength req (cast Long 0))
+                   (get-in @clients [id :max-content-length] max-content-length))
+                (code! ctx protocol HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE :info "Too large")
 
                 (.containsValue headers HttpHeaderNames/EXPECT HttpHeaderValues/CONTINUE true)
-                (manage-expectations opts id req)
+                (ask-to ::continue opts ctx req)
 
                 (.containsValue headers HttpHeaderNames/UPGRADE HttpHeaderValues/WEBSOCKET true)
-                (let [p (.pipeline ctx)]
-                  (if (.get p "ws")
-                    (do ; This is probably unnecessary (and noop) because HttpRequest has no content
-                        ; and so has no ByteBuf to pass back to pipeline!
-                        (ReferenceCountUtil/retain req)
-                        (log/debug "Passing ws upgrade request through http/handler.")
-                        ; Remove self from pipeline for this channel!
-                        (.remove p "http-handler")
-                        (.fireChannelRead ctx req))
-                    (do (log/debug "Dropped ws upgrade request because no ws configured.")
-                        (.close ctx))))
+                (ask-to ::ws-upgrade opts ctx req)
 
                 ; (cast Long 0) worked but (long 0) didn't! maybe...
                 ; https://stackoverflow.com/questions/12586881/clojure-overloaded-method-resolution-for-longs
                 ; FIXME may be vulnerable to reported < actual content length
                 ; TODO tune max-content-length dep on app auth status? Could store in clients registry?
                 (> (HttpUtil/getContentLength req (cast Long 0)) max-content-length)
-                (do (log/warn "Max content length exceeded")
-                    (code! ctx HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE))
+                (code! ctx HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE
+                  :info "Too large")
 
                 :else
-                (let [qsd (-> req .uri QueryStringDecoder.)
-                      {:keys [headers cookies]} (-> req .headers parse-headers)
-                      protocol (.protocolVersion req)
-                      method (-> req .method .toString str/lower-case keyword)
-                        ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
-                        #_ (some-> req .content)]
-                  (if (async/put! in
-                        (->Request (-> ctx .channel .id) (.toString protocol)
-                          {:content-length
-                           (let [l (HttpUtil/getContentLength req (cast Long -1))]
-                             (when-not (neg? l) l))
-                           :charset (HttpUtil/getCharset req)
-                           :content-type (HttpUtil/getMimeType req)}
-                          method headers cookies (.uri req) (.path qsd) (.parameters qsd)))
-                    ; FIXME could `code!` if these methods aren't routed (to prevent abuse)?
-                    (case method (:post :put :patch) (.read ctx) nil)
-                    (do (log/error "Dropped incoming http request because in chan is closed")
-                        (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE)))))))
+                (ask-to ::receive opts ctx req))))
 
           ; Started with https://github.com/netty/netty/blob/master/example/src/main/java/io/netty/example/http/upload/HttpUploadServerHandler.java
 
@@ -463,8 +449,8 @@
                 (try (.offer decoder con)
                      (catch HttpPostRequestDecoder$ErrorDataDecoderException e
                        ; FIXME NPE with PUT x-url-encoded file... % curl ... -X PUT -d ...
-                       (log/warn "Error running POST decoder" (some->> e .getMessage (briefly 120)))
-                       (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
+                       (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY
+                         :warn (str "Error running POST decoder" (some->> e .getMessage (briefly 120))))))
                 (read-chunkwise opts id)
                 ; TODO what if doesn't come through? Does pipeline guarantee?
                 (when-let [^LastHttpContent con (and (instance? LastHttpContent obj) obj)]

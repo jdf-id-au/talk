@@ -83,7 +83,8 @@
   (proxy [SimpleChannelInboundHandler] [WebSocketFrame]
     (userEventTriggered [^ChannelHandlerContext ctx evt]
       ; TODO propagate other user events?
-      (when (instance? WebSocketServerProtocolHandler$HandshakeComplete evt)
+      ; https://stackoverflow.com/a/36421052/780743
+      (when (instance? WebSocketServerProtocolHandler$HandshakeComplete evt) ; TODO .selectedSubprotocol
         (let [ch (.channel ctx)
               id (.id ch)
               out-sub (get-in @clients [id :out-sub])]
