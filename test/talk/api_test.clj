@@ -3,6 +3,7 @@
             [clojure.core.async :as async :refer [chan go go-loop thread >! <! >!! <!! alt! alt!!]]
             [hato.websocket :as hws]
             [hato.client :as hc]
+            [talk.util :refer [ess]]
             [talk.api :as talk]
             [taoensso.timbre :as log])
   (:import
@@ -34,8 +35,9 @@
 
 (extend-protocol Echo
   Connection (echo [_])
-  Request (echo [this] {:status 200 :headers {:content-encoding "text/plain"}
-                        :content (str this) :channel (:channel this)})
+  Request (echo [this] (log/debug "Responding to" (ess this))
+            {:status 200 :headers {:content-encoding "text/plain"}
+             :content (str this) :channel (:channel this)})
   Attribute (echo [_])
   File (echo [_])
   Trail (echo [_])
@@ -74,7 +76,10 @@
       "Clients registry contains websocket client channel.")
     (testing "http"
       (is (= 200 (:status (hc/get (str "http://localhost:" port "/") {:http-client http})))
-        "HTTP GET returns status 200."))
+        "HTTP GET returns status 200.")
+      (is (= 200 (:status (hc/get (str "http://localhost:" port "/hello" {:http-client http}))))
+        ; FIXME doesn't seem to be on same channel
+         "Second request from same client works (should be reusing channel but this isn't tested)."))
     (testing "ws"
       (is (= short-text (when (async/put! (ws :out) short-text) (read!!)))
         "Short text WS roundtrip works.")
@@ -82,7 +87,8 @@
         "Long text WS roundtrip works.")
       (is (= (seq binary) (seq (when (async/put! (ws :out) binary) (read!!))))
         "Binary WS roundtrip works."))
-    (is (nil? (-> ws-client-id evict deref))
-      "(Evicting websocket client)")
-    (is (not (contains? @clients ws-client-id))
-      "Client registry no longer contains websocket client channel.")))
+    (testing "clients registry"
+      (is (nil? (-> ws-client-id evict deref))
+        "(Evicting websocket client)")
+      (is (not (contains? @clients ws-client-id))
+        "Client registry no longer contains websocket client channel."))))

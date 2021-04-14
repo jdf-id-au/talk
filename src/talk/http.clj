@@ -29,7 +29,7 @@
                                                   HttpPostRequestDecoder$EndOfDataDecoderException
                                                   InterfaceHttpData$HttpDataType FileUpload)
            (java.io RandomAccessFile)
-           (java.net URLConnection InetSocketAddress)
+           (java.net InetSocketAddress)
            (java.nio.charset Charset)
            (io.netty.channel.group ChannelGroup)))
 
@@ -86,7 +86,7 @@
 (s/def ::content (s/or ::file ::file ::string string? ::bytes bytes? ::nil nil?))
 ; TODO could enforce HTTP semantics in spec (e.g. (s/and ... checking-fn)
 ; (Some like CORS preflight might need to be stateful and therefore elsewhere... use Netty's impl!)
-; lowercase because no corresponding record because unnecessary
+; `::response` is lowercase because no corresponding record because unnecessary.
 (s/def ::response (s/keys :req-un [:talk.server/channel ::status] :opt-un [::headers ::cookies ::content]))
 
 ; Permissive receive, doesn't enforce HTTP semantics; capitalised because defrecord
@@ -151,7 +151,7 @@
   "Send HTTP response, and manage keep-alive and Content-Length.
    Fires channel read (provides backpressure) on success if keep-alive."
   [^ChannelHandlerContext ctx keep-alive? ^FullHttpResponse res]
-  (log/debug "Responding" res)
+  (log/debug "Responding in" (ess ctx) "with" (ess res))
   (let [status (.status res)
         ok-or-continue? (contains? #{HttpResponseStatus/OK HttpResponseStatus/CONTINUE} status)
         keep-alive? (and keep-alive? ok-or-continue?)]
@@ -166,6 +166,7 @@
 
 (defn stream!
   "Send HTTP response streaming a file, and manage keep-alive and content-length.
+   Application needs to supply :content-type header. Trailing headers not currently supported.
    Fires channel read (provides backpressure) on success if keep-alive."
   [^ChannelHandlerContext ctx keep-alive? ^HttpResponse res ^java.io.File file]
    ; after https://github.com/datskos/ring-netty-adapter/blob/master/src/ring/adapter/plumbing.clj and current docs
@@ -178,9 +179,9 @@
         len (.length raf)
         ; connection seems to close prematurely when using DFR directly on file - because lazy open?
         region (DefaultFileRegion. (.getChannel raf) 0 len)
-               #_(DefaultFileRegion. file 0 len) #_ (ChunkedFile. raf)
+               #_(DefaultFileRegion. file 0 len) #_ (ChunkedFile. raf)]
         ; NB breaks if no os support for zero-copy; might not work with *netty's* ssl
-        hdrs (.headers res)]
+        ;hdrs (.headers res)]
     (HttpUtil/setKeepAlive res keep-alive?)
     (HttpUtil/setContentLength res len)
     #_(when-not (.get hdrs HttpHeaderNames/CONTENT_TYPE)
@@ -192,7 +193,7 @@
         (reify ChannelFutureListener
           (operationComplete [_ _]
             (.close raf)
-            ; Omission of LastHttpContent causes inability to reuse channel. Safari and wget just close channel and try again, firefox and chrome get upset.
+            ; Omission of LastHttpContent causes inability to reuse channel. Safari and wget just close channel and try again, firefox and chrome (ERR_INVALID_HTTP_RESPONSE) get upset and never finish loading page.
             (.writeAndFlush ctx (LastHttpContent/EMPTY_LAST_CONTENT))
             ; request-response backpressure! TODO is this desirable/correct?
             (when keep-alive? (.read ctx))
@@ -278,7 +279,7 @@
 (defn read-chunkwise
   "Reads from HttpPostDecoder and also fires channel read."
   [{:keys [state in] :as opts}]
-  ; TODO work out how to indicate logged errors is while loop to user. Throw and catch? Cleanup?
+  ; TODO work out how to indicate logged errors in while loop to user. Throw and catch? Cleanup?
   (let [^HttpPostRequestDecoder decoder (:decoder @state)
         ^ChannelHandlerContext ctx (:ctx @state)
         ch (.channel ctx)]
@@ -372,7 +373,7 @@
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
   ; TODO read about HTTP/2 https://developers.google.com/web/fundamentals/performance/http2
   [{:keys [state in disk-threshold max-content-length] :as opts}]
-  (log/debug "Starting http handler")
+  #_(log/debug "Starting http handler")
   (let [data-factory (DefaultHttpDataFactory. ^long disk-threshold)]
     (set! (. DiskFileUpload deleteOnExitTemporaryFile) true) ; same as default
     (set! (. DiskFileUpload baseDirectory) nil) ; system temp directory
@@ -424,8 +425,10 @@
                   (do (log/debug "Dropped ws upgrade request because no ws configured.")
                       (.close ctx))))
 
-               ; (cast Long 0) worked but (long 0) didn't! maybe...
-               ; https://stackoverflow.com/questions/12586881/clojure-overloaded-method-resolution-for-longs
+              ; (cast Long 0) worked but (long 0) didn't! maybe...
+              ; https://stackoverflow.com/questions/12586881/clojure-overloaded-method-resolution-for-longs
+              ; FIXME may be vulnerable to reported < actual content length
+              ; TODO tune max-content-length dep on app auth status? Could store in clients registry?
               (> (HttpUtil/getContentLength req (cast Long 0)) max-content-length)
               (do (log/warn "Max content length exceeded")
                   (code! ctx HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE))
@@ -445,6 +448,7 @@
                          :charset (HttpUtil/getCharset req)
                          :content-type (HttpUtil/getMimeType req)}
                         method headers cookies (.uri req) (.path qsd) (.parameters qsd)))
+                  ; FIXME could `code!` if these methods aren't routed (to prevent abuse)?
                   (case method (:post :put :patch) (.read ctx) nil)
                   (do (log/error "Dropped incoming http request because in chan is closed")
                       (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE)))))))
@@ -458,14 +462,18 @@
 
         (if-let [^HttpPostRequestDecoder decoder (:decoder @state)]
           (let [cleanup (fn [] (.destroy decoder) (swap! state dissoc :decoder))]
+            ; TODO what if some other obj comes through? Does pipeline guarantee?
+            ; Should probably cleanup decoder and close chan.
             (when-let [^HttpContent con (and (instance? HttpContent obj) obj)]
               #_(log/debug "decoding")
+              ; TODO could tally size of actual HttpContents and drop if abusive? (vs "stated" content length)
               (try (.offer decoder con)
                    (catch HttpPostRequestDecoder$ErrorDataDecoderException e
                      ; FIXME NPE with PUT x-url-encoded file... % curl ... -X PUT -d ...
                      (log/warn "Error running POST decoder" (some->> e .getMessage (briefly 120)))
                      (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
               (read-chunkwise opts)
+              ; TODO what if doesn't come through? Does pipeline guarantee?
               (when-let [^LastHttpContent con (and (instance? LastHttpContent obj) obj)]
                 (when-not (async/put! in
                             (->Trail (-> ctx .channel .id) cleanup

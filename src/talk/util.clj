@@ -1,7 +1,7 @@
 (ns talk.util
   "Edited highlights from jdf/comfort, to avoid dep."
-  (:import (io.netty.channel ChannelId DefaultChannelId ChannelHandlerContext)
-           (io.netty.handler.codec.http DefaultHttpRequest DefaultHttpResponse)))
+  (:import (io.netty.channel ChannelId ChannelHandlerContext)
+           (io.netty.handler.codec.http HttpRequest)))
 
 (defn retag
   "spec convenience"
@@ -24,11 +24,11 @@
 (extend-protocol Loggable
   ChannelHandlerContext
   (ess [this] (-> this .channel .id .asShortText))
-  DefaultChannelId
+  ChannelId
   (ess [this] (.asShortText this))
-  DefaultHttpRequest
+  HttpRequest
   (ess [this] (str (.method this) \space (.uri this)))
-  ;DefaultHttpResponse
+  ;HttpResponse
   ;(ess [this] ())
   Object
   (ess [this] (.toString this)))

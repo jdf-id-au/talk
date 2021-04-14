@@ -4,7 +4,7 @@
             [talk.server :as server]
             [talk.http :as http]
             [talk.ws :as ws]
-            [talk.util :refer [retag]]
+            [talk.util :refer [retag ess]]
             [hato.websocket :as hws]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen])
@@ -108,15 +108,14 @@
                            msg))))
          out-pub (async/pub out :channel) ; ...to server's handler for that netty channel
          evict (fn [^DefaultChannelId id]
-                 (let [ast (.asShortText id)]
-                   (log/info "Trying to evict" ast (-> (get @clients id) (dissoc :out-sub)))
-                   (some-> channel-group (.find id) .close
-                     (.addListener
-                       (reify ChannelFutureListener
-                         (operationComplete [_ f]
-                           (if (.isSuccess f)
-                             (log/info "Evicted" ast)
-                             (log/warn "Couldn't evict" ast))))))))]
+                 (log/info "Trying to evict" (ess id) (-> (get @clients id) (dissoc :out-sub)))
+                 (some-> channel-group (.find id) .close
+                   (.addListener
+                     (reify ChannelFutureListener
+                       (operationComplete [_ f]
+                         (if (.isSuccess f)
+                           (log/info "Evicted" (ess id))
+                           (log/warn "Couldn't evict" (ess id))))))))]
      (try (let [bootstrap (doto (ServerBootstrap.)
                             ; TODO any need for separate parent and child groups?
                             (.group loop-group)
