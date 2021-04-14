@@ -115,17 +115,16 @@
    Usage:
    - Call from channelActive.
    - Detect websocket upgrade handshake, using userEventTriggered, and update `clients` map."
-  [{:keys [^ChannelGroup channel-group
-           state clients in out-pub]}]
-  (let [ctx ^ChannelHandlerContext (:ctx @state)
-        ch (.channel ctx)
+  [{:keys [^ChannelGroup channel-group clients in out-pub]} ctx]
+  (let [ch (.channel ctx)
         id (.id ch)
         cf (.closeFuture ch)
         out-sub (chan)]
     (try (.add channel-group ch)
          (async/sub out-pub id out-sub)
          (swap! clients assoc id
-           {:type :http ; changed in userEventTriggered
+           {:ctx ctx
+            :type :http ; changed in userEventTriggered
             :out-sub out-sub
             :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp)})
          (when-not (put! in (->Connection id :http))
@@ -199,9 +198,8 @@
 (defn responder
   "Asynchronously submit request to application and wait for its response, or timeout.
    Send application's response to client with a backpressure-maintaning effect function."
-  [{:keys [clients handler-timeout state] :as opts}]
-  (let [{:keys [^ChannelHandlerContext ctx ^HttpVersion protocol keep-alive?]} @state
-        id (-> ctx .channel .id)
+  [{:keys [clients handler-timeout] :as opts} id]
+  (let [{:keys [^ChannelHandlerContext ctx ^HttpVersion protocol keep-alive?]} (get @clients id)
         closed (chan)
         _ (async/close! closed)
         out-sub (get-in @clients [id :out-sub] closed)] ; default to closed chan if out-sub closed
@@ -273,22 +271,21 @@
 
 (defn read-chunkwise
   "Reads from HttpPostDecoder and also fires channel read."
-  [{:keys [state in] :as opts}]
+  [{:keys [clients in] :as opts} id]
   ; TODO work out how to indicate logged errors in while loop to user. Throw and catch? Cleanup? `code!`?
-  (let [^HttpPostRequestDecoder decoder (:decoder @state)
-        ^ChannelHandlerContext ctx (:ctx @state)
-        ch (.channel ctx)]
+  (let [^HttpPostRequestDecoder decoder (get-in @clients [id :decoder])
+        ^ChannelHandlerContext ctx (get-in @clients [id :ctx])]
     (try
       (while (.hasNext decoder)
         (log/debug "decoder has next")
         (when-let [^InterfaceHttpData data (.next decoder)]
-          (when (= data (:partial @state)) (swap! state dissoc :partial))
+          (when (= data (get-in @clients [id :partial])) (swap! clients update id dissoc :partial))
           (condp = (.getHttpDataType data)
             InterfaceHttpData$HttpDataType/Attribute
             (let [^io.netty.handler.codec.http.multipart.Attribute d data ; longhand to avoid clash
                   file? (-> d .isInMemory not)]
               (when-not (async/put! in
-                          (->Attribute (.id ch)
+                          (->Attribute id
                             (.getName d) (.getCharset d)
                             file? (if file? (.getFile d) (.get d))))
                 (log/error "Dropped incoming POST attribute because in chan is closed")))
@@ -296,7 +293,7 @@
             (let [^FileUpload d data file? (-> d .isInMemory not)]
               (if (.isCompleted d)
                 (when-not (async/put! in
-                            (->File (.id ch)
+                            (->File id
                               (.getFilename d) (.getCharset d)
                               (.getContentType d) (.getContentTransferEncoding d)
                               file? (if file? (.getFile d) (.get d))))
@@ -306,8 +303,8 @@
       (when-let [^InterfaceHttpData data (.currentPartialHttpData decoder)]
         (log/debug "partial decoding")
         (.read ctx)
-        (when-not (:partial @state)
-          (swap! state assoc :partial data)))
+        (when-not (get-in @clients [id :partial])
+          (swap! clients update id assoc :partial data)))
           ; TODO could do finer-grained logging/events etc
       (catch HttpPostRequestDecoder$EndOfDataDecoderException e
         (log/info (type e) (some->> e .getMessage (briefly 120)))))))
@@ -336,8 +333,8 @@
 
 (defn manage-expectations
   "Like HttpObjectAggregator, but only manages expect: 100-continue."
-  [{:keys [out state max-content-length] :as opts} req]
-  (let [ctx ^ChannelHandlerContext (:ctx @state)
+  [{:keys [out clients max-content-length] :as opts} id req]
+  (let [ctx ^ChannelHandlerContext (get-in @clients [id :ctx])
         p (.pipeline ctx)
         keep-alive? (HttpUtil/isKeepAlive req)]
     (cond
@@ -353,8 +350,8 @@
 
       :else
       (do (log/debug "Please continue")
-          (async/put! out {:ch (-> ctx .channel .id) :status 100})
-          (responder opts)))))
+          (async/put! out {:ch id :status 100})
+          (responder opts id)))))
 
 ; Interface graph:
 ;   HttpObject
@@ -367,7 +364,7 @@
 (defn ^ChannelHandler handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
   ; TODO read about HTTP/2 https://developers.google.com/web/fundamentals/performance/http2
-  [{:keys [state in disk-threshold max-content-length] :as opts}]
+  [{:keys [clients in disk-threshold max-content-length] :as opts}]
   #_(log/debug "Starting http handler")
   (let [data-factory (DefaultHttpDataFactory. ^long disk-threshold)]
     (set! (. DiskFileUpload deleteOnExitTemporaryFile) true) ; same as default
@@ -386,101 +383,104 @@
         ; Would `respond!` turning off keep alive (if not OK or CONTINUE) terminate upload?
         ; TODO test
 
-        (when-let [^HttpRequest req (and (instance? HttpRequest obj) obj)]
-          (when (instance? FullHttpRequest req)
-            (log/warn "Unexpectedly received FullHttpRequest. POST decoder might not work."))
-          (let [protocol (.protocolVersion req)
-                headers (.headers req)
-                keep-alive? (HttpUtil/isKeepAlive req)
-                decoder (try (HttpPostRequestDecoder. data-factory req)
-                             (catch HttpPostRequestDecoder$ErrorDataDecoderException e
-                               (log/warn "Error setting up POST decoder" e)
-                               (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))]
-            (swap! state assoc :decoder decoder :protocol protocol
+        (let [ch (.channel ctx)
+              id (.id ch)]
+          (when-let [^HttpRequest req (and (instance? HttpRequest obj) obj)]
+            (when (instance? FullHttpRequest req)
+              (log/warn "Unexpectedly received FullHttpRequest. POST decoder might not work."))
+            (let [protocol (.protocolVersion req)
+                  headers (.headers req)
+                  keep-alive? (HttpUtil/isKeepAlive req)
+                  decoder (try (HttpPostRequestDecoder. data-factory req)
+                               (catch HttpPostRequestDecoder$ErrorDataDecoderException e
+                                 (log/warn "Error setting up POST decoder" e)
+                                 (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))]
               ; Move this to ->Request meta if want application to be able to manipulate keep-alive
-              :keep-alive? keep-alive?)
-            (cond
-              (-> req .decoderResult .isSuccess not)
-              (do (log/warn (-> req .decoderResult .cause .getMessage))
-                  (code! ctx HttpResponseStatus/BAD_REQUEST))
+              (swap! clients update id assoc :decoder decoder :protocol protocol :keep-alive? keep-alive?)
+              (cond
+                (-> req .decoderResult .isSuccess not)
+                (do (log/warn (-> req .decoderResult .cause .getMessage))
+                    (code! ctx HttpResponseStatus/BAD_REQUEST))
 
-              (.containsValue headers HttpHeaderNames/EXPECT HttpHeaderValues/CONTINUE true)
-              (manage-expectations opts req)
+                (.containsValue headers HttpHeaderNames/EXPECT HttpHeaderValues/CONTINUE true)
+                (manage-expectations opts id req)
 
-              (.containsValue headers HttpHeaderNames/UPGRADE HttpHeaderValues/WEBSOCKET true)
-              (let [p (.pipeline ctx)]
-                (if (.get p "ws")
-                  (do ; This is probably unnecessary (and noop) because HttpRequest has no content
-                      ; and so has no ByteBuf to pass back to pipeline!
-                      (ReferenceCountUtil/retain req)
-                      (log/debug "Passing ws upgrade request through http/handler.")
-                      ; Remove self from pipeline for this channel!
-                      (.remove p "http-handler")
-                      (.fireChannelRead ctx req))
-                  (do (log/debug "Dropped ws upgrade request because no ws configured.")
-                      (.close ctx))))
+                (.containsValue headers HttpHeaderNames/UPGRADE HttpHeaderValues/WEBSOCKET true)
+                (let [p (.pipeline ctx)]
+                  (if (.get p "ws")
+                    (do ; This is probably unnecessary (and noop) because HttpRequest has no content
+                        ; and so has no ByteBuf to pass back to pipeline!
+                        (ReferenceCountUtil/retain req)
+                        (log/debug "Passing ws upgrade request through http/handler.")
+                        ; Remove self from pipeline for this channel!
+                        (.remove p "http-handler")
+                        (.fireChannelRead ctx req))
+                    (do (log/debug "Dropped ws upgrade request because no ws configured.")
+                        (.close ctx))))
 
-              ; (cast Long 0) worked but (long 0) didn't! maybe...
-              ; https://stackoverflow.com/questions/12586881/clojure-overloaded-method-resolution-for-longs
-              ; FIXME may be vulnerable to reported < actual content length
-              ; TODO tune max-content-length dep on app auth status? Could store in clients registry?
-              (> (HttpUtil/getContentLength req (cast Long 0)) max-content-length)
-              (do (log/warn "Max content length exceeded")
-                  (code! ctx HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE))
+                ; (cast Long 0) worked but (long 0) didn't! maybe...
+                ; https://stackoverflow.com/questions/12586881/clojure-overloaded-method-resolution-for-longs
+                ; FIXME may be vulnerable to reported < actual content length
+                ; TODO tune max-content-length dep on app auth status? Could store in clients registry?
+                (> (HttpUtil/getContentLength req (cast Long 0)) max-content-length)
+                (do (log/warn "Max content length exceeded")
+                    (code! ctx HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE))
 
-              :else
-              (let [qsd (-> req .uri QueryStringDecoder.)
-                    {:keys [headers cookies]} (-> req .headers parse-headers)
-                    protocol (.protocolVersion req)
-                    method (-> req .method .toString str/lower-case keyword)
-                      ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
-                      #_ (some-> req .content)]
-                (if (async/put! in
-                      (->Request (-> ctx .channel .id) (.toString protocol)
-                        {:content-length
-                         (let [l (HttpUtil/getContentLength req (cast Long -1))]
-                           (when-not (neg? l) l))
-                         :charset (HttpUtil/getCharset req)
-                         :content-type (HttpUtil/getMimeType req)}
-                        method headers cookies (.uri req) (.path qsd) (.parameters qsd)))
-                  ; FIXME could `code!` if these methods aren't routed (to prevent abuse)?
-                  (case method (:post :put :patch) (.read ctx) nil)
-                  (do (log/error "Dropped incoming http request because in chan is closed")
-                      (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE)))))))
+                :else
+                (let [qsd (-> req .uri QueryStringDecoder.)
+                      {:keys [headers cookies]} (-> req .headers parse-headers)
+                      protocol (.protocolVersion req)
+                      method (-> req .method .toString str/lower-case keyword)
+                        ; Shouldn't really have body for GET, DELETE, TRACE, OPTIONS, HEAD
+                        #_ (some-> req .content)]
+                  (if (async/put! in
+                        (->Request (-> ctx .channel .id) (.toString protocol)
+                          {:content-length
+                           (let [l (HttpUtil/getContentLength req (cast Long -1))]
+                             (when-not (neg? l) l))
+                           :charset (HttpUtil/getCharset req)
+                           :content-type (HttpUtil/getMimeType req)}
+                          method headers cookies (.uri req) (.path qsd) (.parameters qsd)))
+                    ; FIXME could `code!` if these methods aren't routed (to prevent abuse)?
+                    (case method (:post :put :patch) (.read ctx) nil)
+                    (do (log/error "Dropped incoming http request because in chan is closed")
+                        (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE)))))))
 
-        ; Started with https://github.com/netty/netty/blob/master/example/src/main/java/io/netty/example/http/upload/HttpUploadServerHandler.java
+          ; Started with https://github.com/netty/netty/blob/master/example/src/main/java/io/netty/example/http/upload/HttpUploadServerHandler.java
 
-        ; PUT and PATCH do work, but only if HttpHeaderValues/MULTIPART_FORM_DATA it seems
-        ; Not enough to have content-type and data stream (tries to parse as attribute).
-        ; This is probably ok; lots of benefit from HPRD's Mixed{Attribute,FileUpload} classes
-        ; (in-memory, switches to disk after disk-threshold).
+          ; PUT and PATCH do work, but only if HttpHeaderValues/MULTIPART_FORM_DATA it seems
+          ; Not enough to have content-type and data stream (tries to parse as attribute).
+          ; This is probably ok; lots of benefit from HPRD's Mixed{Attribute,FileUpload} classes
+          ; (in-memory, switches to disk after disk-threshold).
 
-        (if-let [^HttpPostRequestDecoder decoder (:decoder @state)]
-          (let [cleanup (fn [] (.destroy decoder) (swap! state dissoc :decoder))]
-            ; TODO what if some other obj comes through? Does pipeline guarantee?
-            ; Should probably cleanup decoder and close chan.
-            (when-let [^HttpContent con (and (instance? HttpContent obj) obj)]
-              #_(log/debug "decoding")
-              ; TODO could tally size of actual HttpContents and drop if abusive? (vs "stated" content length)
-              (try (.offer decoder con)
-                   (catch HttpPostRequestDecoder$ErrorDataDecoderException e
-                     ; FIXME NPE with PUT x-url-encoded file... % curl ... -X PUT -d ...
-                     (log/warn "Error running POST decoder" (some->> e .getMessage (briefly 120)))
-                     (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
-              (read-chunkwise opts)
-              ; TODO what if doesn't come through? Does pipeline guarantee?
-              (when-let [^LastHttpContent con (and (instance? LastHttpContent obj) obj)]
-                (when-not (async/put! in
-                            (->Trail (-> ctx .channel .id) cleanup
-                                     (-> con .trailingHeaders parse-headers :headers)))
-                  (cleanup)
-                  (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself."))
-                (responder opts))))
-          (responder opts))
-        #_(log/debug "End of http/handler."))
+          (if-let [^HttpPostRequestDecoder decoder (get-in @clients [id :decoder])]
+            (let [cleanup (fn [] (.destroy decoder) (swap! clients update id dissoc :decoder))]
+              ; TODO what if some other obj comes through? Does pipeline guarantee?
+              ; Should probably cleanup decoder and close chan.
+              (when-let [^HttpContent con (and (instance? HttpContent obj) obj)]
+                #_(log/debug "decoding")
+                ; TODO could tally size of actual HttpContents and drop if abusive? (vs "stated" content length)
+                (try (.offer decoder con)
+                     (catch HttpPostRequestDecoder$ErrorDataDecoderException e
+                       ; FIXME NPE with PUT x-url-encoded file... % curl ... -X PUT -d ...
+                       (log/warn "Error running POST decoder" (some->> e .getMessage (briefly 120)))
+                       (code! ctx HttpResponseStatus/UNPROCESSABLE_ENTITY)))
+                (read-chunkwise opts id)
+                ; TODO what if doesn't come through? Does pipeline guarantee?
+                (when-let [^LastHttpContent con (and (instance? LastHttpContent obj) obj)]
+                  (when-not (async/put! in
+                              (->Trail (-> ctx .channel .id) cleanup
+                                       (-> con .trailingHeaders parse-headers :headers)))
+                    (cleanup)
+                    (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself."))
+                  (responder opts id))))
+            (responder opts id))
+          #_(log/debug "End of http/handler.")))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
-        (case (.getMessage cause)
-          "Connection reset by peer" (log/info cause)
-          (log/error "Error in http handler" cause))
-        (some-> ^HttpPostRequestDecoder (:decoder @state) .destroy)
+        (let [ch (.channel ctx)
+              id (.id ch)]
+          (case (.getMessage cause)
+            "Connection reset by peer" (log/info cause)
+            (log/error "Error in http handler" cause))
+          (some-> ^HttpPostRequestDecoder (get-in @clients [id :decoder]) .destroy))
         (.close ctx)))))

@@ -34,14 +34,10 @@
 (defmethod message-type Binary [_] ::ws/Binary)
 
 (defn ^ChannelHandler tracker
-  [{:keys [state] :as opts}]
+  [{:keys [clients] :as opts}]
   (proxy [SimpleChannelInboundHandler] [HttpObject]
     (channelActive [^ChannelHandlerContext ctx]
-        ; TODO is this safe?
-        ; Doesn't a given channel keep the same context instance,
-        ; which is set by the pipeline in initChannel?
-        (swap! state assoc :ctx ctx)
-        (http/track-channel opts)
+        (http/track-channel opts ctx)
         (-> ctx .channel .config
               ; facilitate backpressure on subsequent reads; requires .read see branches below
           (-> (.setAutoRead false)
@@ -61,31 +57,30 @@
   (log/debug "Starting pipeline")
   (proxy [ChannelInitializer] []
     (initChannel [^SocketChannel ch]
-      ; add state atom instead of using netty's Channel.attr
-      (let [channel-opts (assoc opts :state (atom {}))]
+      ; store state in clients atom instead of using netty's Channel.attr
+      (doto (.pipeline ch)
+        ; TODO could add handlers selectively according to need (from within the channel)
+        (.addLast "http" (HttpServerCodec.
+                           HttpObjectDecoder/DEFAULT_MAX_INITIAL_LINE_LENGTH
+                           HttpObjectDecoder/DEFAULT_MAX_HEADER_SIZE
+                           max-chunk-size))
+        (.addLast "tracker" (tracker opts))
+        ; less network but more memory
+        #_(.addLast "http-compr" (HttpContentCompressor.))
+        #_(.addLast "http-decompr" (HttpContentDecompressor.))
+        (.addLast "streamer" (ChunkedWriteHandler.))
+        (.addLast "http-handler" (http/handler opts)))
+      (when ws-path
         (doto (.pipeline ch)
-          ; TODO could add handlers selectively according to need (from within the channel)
-          (.addLast "http" (HttpServerCodec.
-                             HttpObjectDecoder/DEFAULT_MAX_INITIAL_LINE_LENGTH
-                             HttpObjectDecoder/DEFAULT_MAX_HEADER_SIZE
-                             max-chunk-size))
-          (.addLast "tracker" (tracker channel-opts))
-          ; less network but more memory
-          #_(.addLast "http-compr" (HttpContentCompressor.))
-          #_(.addLast "http-decompr" (HttpContentDecompressor.))
-          (.addLast "streamer" (ChunkedWriteHandler.))
-          (.addLast "http-handler" (http/handler channel-opts)))
-        (when ws-path
-          (doto (.pipeline ch)
-            ; Needed for WebSocketServerProtocolHandler but not wanted for http/handler
-            ; (so HttpPostRequestDecoder streams properly)
-            ; so need to pass through ws upgrade requests...
-            (.addLast "http-agg" (HttpObjectAggregator. max-content-length))
-            #_(.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions
-            (.addLast "ws" (WebSocketServerProtocolHandler.
-                             ; TODO [application] could specify subprotocol?
-                             ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
-                             ws-path nil true max-frame-size handshake-timeout))
-            ; TODO replace with functionality in main handler (e.g. via disk if big)
-            (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
-            (.addLast "ws-handler" (ws/handler channel-opts))))))))
+          ; Needed for WebSocketServerProtocolHandler but not wanted for http/handler
+          ; (so HttpPostRequestDecoder streams properly)
+          ; so need to pass through ws upgrade requests...
+          (.addLast "http-agg" (HttpObjectAggregator. max-content-length))
+          #_(.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions
+          (.addLast "ws" (WebSocketServerProtocolHandler.
+                           ; TODO [application] could specify subprotocol?
+                           ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
+                           ws-path nil true max-frame-size handshake-timeout))
+          ; TODO replace with functionality in main handler (e.g. via disk if big)
+          (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
+          (.addLast "ws-handler" (ws/handler opts)))))))

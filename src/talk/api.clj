@@ -47,7 +47,7 @@
 (s/def ::max-frame-size (s/int-in (* 32 1024) (* 1024 1024)))
 (s/def ::max-message-size (s/int-in (* 32 1024) (* 1024 1024 1024))) ; TODO cover with tests....
 (s/def ::max-chunk-size (s/int-in 1024 (* 1024 1024)))
-(s/def ::max-content-length (s/int-in (* 32 1024) (* 1024 1024 1024)))
+(s/def ::max-content-length (s/int-in (* 32 1024) (* 1024 1024 1024))) ; but netty int limit!
 (s/def ::opts (s/keys :req-un [::in-buffer ::out-buffer ::handler-timeout
                                ::disk-threshold
                                ::handshake-timeout ::max-frame-size ::max-message-size
