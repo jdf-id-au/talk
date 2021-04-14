@@ -19,7 +19,7 @@
            (io.netty.channel ChannelFutureListener DefaultChannelId)
            (java.nio ByteBuffer)
            (java.io ByteArrayOutputStream)
-           (java.nio.channels Channels WritableByteChannel))
+           (java.nio.channels Channels))
   (:refer-clojure :exclude [deliver]))
 
 (s/def ::incoming (s/multi-spec server/message-type retag))
@@ -32,7 +32,7 @@
 #_ (s/exercise ::outgoing)
 #_ (s/exercise ::incoming) ; FIXME have another look at retag and multi-spec (sub-specs work)
 
-; TODO: (see user.clj)
+; TODO:
 ; Give error if client tries to connect ws at wrong path
 ; Routing and much http entirely within next layer up, e.g. jdf/foundation
 ; vigorous benchmarking and stress testing
@@ -146,6 +146,8 @@
             (-> loop-group .shutdownGracefully .sync)
             (log/error "Unable to bootstrap server" e)
             (throw e))))))
+
+; Client
 
 (defprotocol Joinable
   (append [this to]))

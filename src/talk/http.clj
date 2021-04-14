@@ -181,12 +181,8 @@
         region (DefaultFileRegion. (.getChannel raf) 0 len)
                #_(DefaultFileRegion. file 0 len) #_ (ChunkedFile. raf)]
         ; NB breaks if no os support for zero-copy; might not work with *netty's* ssl
-        ;hdrs (.headers res)]
     (HttpUtil/setKeepAlive res keep-alive?)
     (HttpUtil/setContentLength res len)
-    #_(when-not (.get hdrs HttpHeaderNames/CONTENT_TYPE)
-        (some->> file .getName URLConnection/guessContentTypeFromName ; this is pretty weak
-          (.set hdrs HttpHeaderNames/CONTENT_TYPE)))
     (.writeAndFlush ctx res) ; initial line and header
     (let [cf (.writeAndFlush ctx region)] ; encoded into several HttpContents?
       (.addListener cf
@@ -195,7 +191,7 @@
             (.close raf)
             ; Omission of LastHttpContent causes inability to reuse channel. Safari and wget just close channel and try again, firefox and chrome (ERR_INVALID_HTTP_RESPONSE) get upset and never finish loading page.
             (.writeAndFlush ctx (LastHttpContent/EMPTY_LAST_CONTENT))
-            ; request-response backpressure! TODO is this desirable/correct?
+            ; request-response backpressure!
             (when keep-alive? (.read ctx))
             (log/debug "Finished streaming" (ess res)
               "on" (ess ctx) (when-not keep-alive? ", about to close because not keep-alive"))))))))
@@ -216,18 +212,17 @@
               (alt! out-sub ([v] v) (async/timeout handler-timeout) ::timeout)]
           (case res
             ::timeout
-            (do (log/error "Dropped incoming http request because of out chan timeout")
+            (do (log/error "Sent no http response because of out chan timeout")
                 (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE))
             nil
-            (do (log/warn "Dropped incoming http request because out chan closed")
+            (do (log/warn "Sent no http response because out chan closed")
                 (code! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE))
             (do
               #_(log/debug "Trying to send" (ess res))
               (if (instance? java.io.File content)
                 ; TODO add support for other streaming sources (use protocols?)
                 ; Streaming:
-                (let [res (DefaultHttpResponse. protocol
-                            (HttpResponseStatus/valueOf status))
+                (let [res (DefaultHttpResponse. protocol (HttpResponseStatus/valueOf status))
                       hdrs (.headers res)]
                   (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
                   (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
@@ -279,7 +274,7 @@
 (defn read-chunkwise
   "Reads from HttpPostDecoder and also fires channel read."
   [{:keys [state in] :as opts}]
-  ; TODO work out how to indicate logged errors in while loop to user. Throw and catch? Cleanup?
+  ; TODO work out how to indicate logged errors in while loop to user. Throw and catch? Cleanup? `code!`?
   (let [^HttpPostRequestDecoder decoder (:decoder @state)
         ^ChannelHandlerContext ctx (:ctx @state)
         ch (.channel ctx)]
