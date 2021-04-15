@@ -146,7 +146,7 @@
 
 ; after https://netty.io/4.1/xref/io/netty/example/http/websocketx/server/WebSocketIndexPageHandler.html
 (defn respond!
-  "Send HTTP response, and manage keep-alive and Content-Length.
+  "Send HTTP response, and manage keep-alive and content-length.
    Fires channel read (provides backpressure) on success if keep-alive."
   [^ChannelHandlerContext ctx keep-alive? ^FullHttpResponse res]
   (log/debug "Responding in" (ess ctx) "with" (ess res) (when keep-alive? "and keep-alive"))
@@ -160,7 +160,7 @@
     (let [cf (.writeAndFlush ctx res)]
       (if keep-alive?
         ; HTTP does actually permit pipelined half-duplex, where consecutive requests yield consecutive responses (on same channel) https://stackoverflow.com/questions/23419469
-        ; The request-response backpressure from (.read ctx) here reduces the concurrency of request processing (i.e. doesn't start processing second request until first response is sent). Would need to profile with various workloads and core counts to work out if significant. Protects server at expense of client. Client is free to open another channel too.
+        ; The request-response backpressure from (.read ctx) here reduces the concurrency of request processing (i.e. doesn't start processing second request until first response is sent). Would need to profile with various workloads and core counts to work out if significant. Protects server at expense of single-channel client load time. Client is free to open another channel.
         (.addListener cf (reify ChannelFutureListener (operationComplete [_ _] (.read ctx))))
         (.addListener cf ChannelFutureListener/CLOSE)))))
 
@@ -201,8 +201,10 @@
   (respond! ctx true (DefaultFullHttpResponse. HttpVersion/HTTP_1_1 status Unpooled/EMPTY_BUFFER)))
 
 (defn responder
-  "Asynchronously wait for application's response, or timeout.
-   Send application's response to client with a backpressure-maintaning effect function."
+  "Asynchronously wait for application's (or `short-circuit`ed) response, or timeout.
+   Send application's response to client with a backpressure-maintaning effect function.
+   POST/PUT/PATCH requests are actually not fully read until application approves them with status 102;
+   this status is intercepted here and causes channel read rather than being sent to client."
   [{:keys [clients handler-timeout] :as opts} id]
   (let [{:keys [^ChannelHandlerContext ctx ^HttpVersion protocol keep-alive?]} (get @clients id)
         ^HttpVersion protocol (or protocol HttpVersion/HTTP_1_1)
@@ -223,9 +225,8 @@
             (do (log/warn "Sent no http response on" (ess id) "because out chan closed")
                 (emergency! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))
             (do
-              ; TODO fire context read here for put/post/patch IF applications accepts e.g. 102?
               #_(log/debug "Trying to send" (ess res))
-              (case status 102 (.read ctx) ; and don't actually `respond!`
+              (case status 102 (.read ctx)
                 (if (instance? java.io.File content)
                   ; TODO add support for other streaming sources (use protocols?)
                   ; Streaming:
@@ -354,7 +355,7 @@
             (ReferenceCountUtil/retain req)
             (.remove p "http-handler")
             (.fireChannelRead ctx req)
-            false)
+            false) ; don't respond from this handler
         (do (log/info "Wrong WS path" path)
             (short-circuit out id HttpResponseStatus/BAD_REQUEST)))
       (do (log/info "No WS configured" path)
