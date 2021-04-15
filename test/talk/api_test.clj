@@ -34,8 +34,8 @@
   (echo [this]))
 
 (extend-protocol Echo
-  Connection (echo [_])
-  Request (echo [this] (log/debug "Responding to" (ess this))
+  Connection (echo [this] #_(log/debug (ess this)))
+  Request (echo [this]
             {:status 200 :headers {:content-encoding "text/plain"}
              :content (str this) :channel (:channel this)})
   Attribute (echo [_])
@@ -77,8 +77,7 @@
     (testing "http"
       (is (= 200 (:status (hc/get (str "http://localhost:" port "/") {:http-client http})))
         "HTTP GET returns status 200.")
-      (is (= 200 (:status (hc/get (str "http://localhost:" port "/hello" {:http-client http}))))
-        ; FIXME doesn't seem to be on same channel
+      (is (= 200 (:status (hc/get (str "http://localhost:" port "/hello") {:http-client http})))
          "Second request from same client works (should be reusing channel but this isn't tested)."))
     (testing "ws"
       (is (= short-text (when (async/put! (ws :out) short-text) (read!!)))

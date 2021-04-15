@@ -107,7 +107,7 @@
                            msg))))
          out-pub (async/pub out :channel) ; ...to server's handler for that netty channel
          evict (fn [^DefaultChannelId id]
-                 (log/info "Trying to evict" (ess id) (-> (get @clients id) (dissoc :out-sub)))
+                 (log/info "Trying to evict" (ess id) #_(-> (get @clients id) (dissoc :out-sub)))
                  (some-> channel-group (.find id) .close
                    (.addListener
                      (reify ChannelFutureListener

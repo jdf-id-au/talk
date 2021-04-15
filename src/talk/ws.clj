@@ -65,7 +65,7 @@
                     (log/info "Cancelled message" msg "to" id))
                   (when-not (.isSuccess f)
                     (log/error "Send error for" msg "to" id (.cause f)))
-                  (log/info "ChannelFutureListener")
+                  #_(log/info "ChannelFutureListener")
                   (take!))))) ; facilitate backpressure
         (take!))))) ; even when previous message unsendable
 

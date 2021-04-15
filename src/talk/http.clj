@@ -149,7 +149,7 @@
   "Send HTTP response, and manage keep-alive and Content-Length.
    Fires channel read (provides backpressure) on success if keep-alive."
   [^ChannelHandlerContext ctx keep-alive? ^FullHttpResponse res]
-  (log/debug "Responding in" (ess ctx) "with" (ess res))
+  (log/debug "Responding in" (ess ctx) "with" (ess res) (when keep-alive? "and keep-alive"))
   (let [status (.status res)
         ; TODO do any other codes merit keep-alive?
         ok-or-continue? (contains? #{HttpResponseStatus/OK HttpResponseStatus/CONTINUE} status)
@@ -197,9 +197,8 @@
               "on" (ess ctx) (when-not keep-alive? ", about to close because not keep-alive"))))))))
 
 (defn emergency!
-  [ctx ^HttpVersion protocol ^HttpResponseStatus status log-level log-message]
-  (log/logp log-level log-message)
-  (respond! ctx true (DefaultFullHttpResponse. protocol status Unpooled/EMPTY_BUFFER)))
+  [ctx ^HttpResponseStatus status]
+  (respond! ctx true (DefaultFullHttpResponse. HttpVersion/HTTP_1_1 status Unpooled/EMPTY_BUFFER)))
 
 (defn responder
   "Asynchronously wait for application's response, or timeout.
@@ -218,11 +217,11 @@
               ^HttpResponseStatus status (if (int? status) (HttpResponseStatus/valueOf status) status)]
           (case res
             ::timeout
-            (emergency! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE
-              :error "Sent no http response because of out chan timeout")
+            (do (log/error "Sent no http response on" (ess id) "because of out chan timeout")
+                (emergency! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))
             nil
-            (emergency! ctx protocol HttpResponseStatus/SERVICE_UNAVAILABLE
-              :warn "Sent no http response because out chan closed")
+            (do (log/warn "Sent no http response on" (ess id) "because out chan closed")
+                (emergency! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))
             (do
               ; TODO fire context read here for put/post/patch IF applications accepts e.g. 102?
               #_(log/debug "Trying to send" (ess res))
@@ -249,15 +248,14 @@
                       (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
                     (respond! ctx keep-alive? res)))))))
         (catch Exception e
-          (emergency! ctx protocol HttpResponseStatus/INTERNAL_SERVER_ERROR
-            :error "Error in http response handler")
-          (log/error e))))))
+          (log/error "Error in http response handler" e)
+          (emergency! ctx HttpResponseStatus/INTERNAL_SERVER_ERROR))))))
 
 (defn short-circuit
   "Respond from this library, not application. Returns true if successful."
   [out channel ^HttpResponseStatus status]
   ; TODO html error pages?
-  (or (async/put! out {:channel channel :status (.code status)}) ; TODO callback responder?
+  (or (async/put! out {:channel channel :status (.code status)})
       (log/warn "Unable to respond because out chan closed")))
 
 ; Requests
@@ -286,8 +284,8 @@
                   (assoc hs lck v)))))))
       {})))
 
-(defn read-chunkwise
-  "Reads from HttpPostDecoder and also fires channel read."
+(defn read-chunkwise!
+  "Read from HttpPostDecoder or fire channel read if partial data."
   [{:keys [clients in] :as opts} id]
   ; TODO work out how to indicate logged errors in while loop to user. Throw and catch? Cleanup? `code!`?
   (let [^HttpPostRequestDecoder decoder (get-in @clients [id :decoder])
@@ -393,7 +391,8 @@
 ;     -> HttpMessage  |-> FullHttpRequest
 ;          -> HttpRequest
 
-(defprotocol ReadableHttpObject (read! [this ctx opts] "Read channel and indicate whether to call responder."))
+(defprotocol ReadableHttpObject
+  (read! [this ctx opts] "Read channel and indicate whether to call responder."))
 
 (extend-protocol ReadableHttpObject
   FullHttpRequest
@@ -408,10 +407,15 @@
           protocol (.protocolVersion this)
           headers (.headers this)
           keep-alive? (HttpUtil/isKeepAlive this)
-          decoder (try (HttpPostRequestDecoder. data-factory this)
-                       (catch HttpPostRequestDecoder$ErrorDataDecoderException e
-                         (log/warn "Error setting up POST decoder" e)
-                         (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)))]
+          method (-> this .method .toString str/lower-case keyword)
+          decoder (case method
+                    (:put :post :patch)
+                    (try (HttpPostRequestDecoder. data-factory this)
+                         (catch HttpPostRequestDecoder$ErrorDataDecoderException e
+                           (log/warn "Error setting up POST decoder" e)
+                           (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)))
+                    ; Not accepting body for other methods
+                    nil)]
       (swap! clients update id assoc :decoder decoder :protocol protocol :keep-alive? keep-alive?)
       (cond
         (-> this .decoderResult .isSuccess not)
@@ -442,32 +446,40 @@
   ; Not enough to have content-type and data stream (tries to parse as attribute).
   ; This is probably ok; lots of benefit from HPRD's Mixed{Attribute,FileUpload} classes
   ; (in-memory, switches to disk after disk-threshold).
+
+  ; FIXME work out exactly what HttpPostStandardRequestDecoder wants (non-multipart) wrt headers etc.
+
   (read! [this ctx {:keys [clients out in] :as opts}]
     (let [ch (.channel ctx)
           id (.id ch)
           decoder (get-in @clients [id :decoder])
           cleanup (fn [] (.destroy decoder) (swap! clients update id dissoc :decoder))]
-      (try (.offer decoder this)
-           ; TODO could tally size of actual HttpContents and drop if abusive? (vs "stated" content length)
-           (read-chunkwise opts id)
-           (when (instance? LastHttpContent this)
-             (when-not (async/put! in
-                         (->Trail id cleanup
-                           (-> ^LastHttpContent this .trailingHeaders parse-headers :headers)))
-               (cleanup)
-               (log/error "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself."))
-             (responder opts id))
-           (catch HttpPostRequestDecoder$ErrorDataDecoderException e
-             ; FIXME NPE with PUT x-url-encoded file... % curl ... -X PUT -d ...
-             (log/warn "Error running POST decoder" (some->> e .getMessage (briefly 120)))
-             (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY))
-           (catch IllegalStateException _
-             (log/debug "Tried to write to destroyed decoder"))))))
+      (if decoder
+        (try (.offer decoder this)
+             ; TODO could tally size of actual HttpContents and drop if abusive?
+             ; (vs "stated" content length)
+             (read-chunkwise! opts id)
+             (when (instance? LastHttpContent this)
+               (or (async/put! in
+                     (->Trail id cleanup
+                       (-> ^LastHttpContent this .trailingHeaders parse-headers :headers)))
+                   (do (cleanup)
+                       (log/error
+                         "Couldn't deliver cleanup fn because in chan is closed. Cleaned up myself.")
+                       (short-circuit out id HttpResponseStatus/SERVICE_UNAVAILABLE))))
+             (catch HttpPostRequestDecoder$ErrorDataDecoderException e
+               ; FIXME NPE with PUT x-url-encoded file... % curl ... -X PUT -d ...
+               (log/warn "Error running POST decoder" (some->> e .getMessage (briefly 120)))
+               (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY))
+             (catch IllegalStateException e
+               (log/debug "Tried to write to destroyed decoder" e)))
+        ; Ignore EmptyLastHttpContent following requests with methods which we don't allow to have body.
+        #_(log/debug "Dropped" this "because no decoder. Does method support body?")))))
 
 (defn ^ChannelHandler handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
   ; TODO read about HTTP/2 https://developers.google.com/web/fundamentals/performance/http2
-  [{:keys [clients in disk-threshold max-content-length] :as opts}]
+  [{:keys [clients disk-threshold] :as opts}]
   #_(log/debug "Starting http handler")
   (let [opts (assoc opts :data-factory (DefaultHttpDataFactory. ^long disk-threshold))]
     (set! (. DiskFileUpload deleteOnExitTemporaryFile) true) ; same as default
@@ -476,14 +488,16 @@
     (set! (. DiskAttribute baseDirectory) nil)
     (proxy [SimpleChannelInboundHandler] [HttpObject]
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
+        (log/debug "Received" (ess obj))
         (when (read! obj ctx opts)
-          (responder opts (-> ctx .channel .id))
-          #_(log/debug "End of http/handler.")))
+          (responder opts (-> ctx .channel .id)))
+        #_(log/debug "End of http/handler."))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
         (let [ch (.channel ctx)
               id (.id ch)]
           (case (.getMessage cause)
             "Connection reset by peer" (log/info cause)
-            (log/error "Error in http handler" cause))
+            (do (log/error "Error in http handler" cause)
+                (emergency! ctx HttpResponseStatus/INTERNAL_SERVER_ERROR)))
           (some-> ^HttpPostRequestDecoder (get-in @clients [id :decoder]) .destroy))
         (.close ctx)))))
