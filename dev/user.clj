@@ -39,8 +39,8 @@
     ;(defmethod clojure.pprint/simple-dispatch Text [_] prn)
     ;(defmethod clojure.pprint/simple-dispatch Binary [_] prn))
 
-; Can test file upload POST and PUT with (respectively):
-; Will only be :file if over threshold (default 16KB)
+; Can test file upload POST and PUT with (respectively, after setting up echo server):
+; Will only be :file? if over threshold (default 16KB)
 ; FIXME does seem fairly slow for huge files (adjust chunk size?)
 ; % curl http://localhost:8125/path -v --form "fileupload=@file.pdf;filename=hmm.pdf"
 ; $ curl http://localhost:8125/path -v -T file.pdf

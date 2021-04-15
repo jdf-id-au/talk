@@ -18,6 +18,7 @@
   (reset! test-server (talk/server! port {:ws-path "/ws"}))
   (f)
   ((:close @test-server)))
+#_ ((:close @test-server)) ; if breaks while testing
 
 (defn with-clients [f]
   (swap! test-clients assoc

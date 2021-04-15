@@ -33,7 +33,6 @@
 #_ (s/exercise ::incoming) ; FIXME have another look at retag and multi-spec (sub-specs work)
 
 ; TODO:
-; Give error if client tries to connect ws at wrong path
 ; Routing and much http entirely within next layer up, e.g. jdf/foundation
 ; vigorous benchmarking and stress testing
 

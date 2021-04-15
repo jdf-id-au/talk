@@ -1,7 +1,7 @@
 (ns talk.util
   "Edited highlights from jdf/comfort, to avoid dep."
   (:import (io.netty.channel ChannelId ChannelHandlerContext)
-           (io.netty.handler.codec.http HttpRequest)))
+           (io.netty.handler.codec.http HttpRequest HttpResponse)))
 
 (defn retag
   "spec convenience"
@@ -28,8 +28,8 @@
   (ess [this] (.asShortText this))
   HttpRequest
   (ess [this] (str (.method this) \space (.uri this)))
-  ;HttpResponse
-  ;(ess [this] ())
+  HttpResponse
+  (ess [this] (str (.protocolVersion this) \space (.status this) \space (.headers this)))
   Object
   (ess [this] (.toString this))
   nil
