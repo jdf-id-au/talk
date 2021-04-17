@@ -114,7 +114,7 @@
   (toString [r]
     (str "<File " \" name \" \space content-type
       (if file? (str " written to disk at " (.getPath ^java.io.File value))
-                " kept in memory because small") " from " (on r) \>)))
+                (str " kept in memory because short" #_#_(count value) \B)) " from " (on r) \>)))
 ; trailing headers ; NB if echoing file, should delay cleanup until fully sent
 (s/def ::Trail (s/keys :req-un [:talk.server/channel ::cleanup ::headers]))
 (defrecord Trail [channel cleanup headers]
@@ -443,7 +443,8 @@
                            (catch HttpPostRequestDecoder$ErrorDataDecoderException e
                              (log/warn "Error setting up POST decoder" e)
                              (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)))
-                      (fake-decoder content-type content-length max-content-length charset))
+                      (fake-decoder (.createFileUpload data-factory this "payload" ""
+                                      content-type nil charset content-length)))
                     ; Not accepting body for other methods
                     nil)]
       (assoc wch :decoder decoder

@@ -6,7 +6,7 @@
            (io.netty.util AttributeKey)
            (io.netty.channel.group ChannelGroup)
            (clojure.lang IPersistentMap ILookup IPersistentCollection Counted Seqable Associative IObj MapEntry)
-           (io.netty.handler.codec.http.multipart MixedAttribute InterfaceHttpPostRequestDecoder HttpPostRequestDecoder$NotEnoughDataDecoderException HttpPostRequestDecoder$EndOfDataDecoderException MixedFileUpload)
+           (io.netty.handler.codec.http.multipart MixedAttribute InterfaceHttpPostRequestDecoder HttpPostRequestDecoder$NotEnoughDataDecoderException HttpPostRequestDecoder$EndOfDataDecoderException MixedFileUpload HttpDataFactory FileUpload)
            (java.nio.charset Charset)))
 
 ; Copy-past from jdf/comfort to avoid dep
@@ -145,16 +145,15 @@
 (defn fake-decoder
   "All I want is to be able to receive chunked plain POST/PUT/PATCH bodies!
    Return a single FileUpload. Use content-type: application/octet-stream for binary."
-  [^String contentType size ^long limitSize ^Charset charset]
-  (let [mfu (MixedFileUpload. "payload" "" contentType nil charset size limitSize)
-        delivered? (atom false)]
+  [^FileUpload fu]
+  (let [delivered? (atom false)]
     (reify InterfaceHttpPostRequestDecoder
       (isMultipart [_] false)
       (setDiscardThreshold [_ _] (unsupported))
       (getDiscardThreshold [_] (unsupported))
       (getBodyHttpDatas [_]
-        (if (.isCompleted mfu)
-          [mfu]
+        (if (.isCompleted fu)
+          [fu]
           (throw (HttpPostRequestDecoder$NotEnoughDataDecoderException.
                    (str "Need more chunks " name)))))
       ; Only proposing to collect one.
@@ -163,20 +162,20 @@
       (getBodyHttpData [this _]
         (.getBodyHttpDatas this))
       (offer [_ con]
-        ; TODO Double check this handles refcounts properly
-        (.addContent mfu (.content con) (instance? LastHttpContent con)))
+        ; TODO double check HPRD impls
+        (.addContent fu (.content (.retain con)) (instance? LastHttpContent con)))
       (hasNext [_]
-        (and (not @delivered?) (.isCompleted mfu)))
+        (and (not @delivered?) (.isCompleted fu)))
       (next [_]
-        (if (.isCompleted mfu)
+        (if (.isCompleted fu)
           (if @delivered?
             (throw (HttpPostRequestDecoder$EndOfDataDecoderException.))
-            (and (reset! delivered? true) mfu))))
+            (and (reset! delivered? true) fu))))
       (currentPartialHttpData [_]
-        mfu)
+        fu)
       (destroy [_]
-        (.delete mfu)
-        (.release mfu)
+        (.delete fu)
+        (.release fu)
         nil)
       (cleanFiles [_] (unsupported))
       (removeHttpDataFromClean [_ _] (unsupported)))))
