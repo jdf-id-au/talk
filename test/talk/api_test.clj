@@ -42,7 +42,7 @@
               {:status 200 :headers {:content-type "text/plain; charset=utf-8"}
                :content (str this) :channel channel}))
   Attribute (echo [this] (log/debug "Received" (str this)))
-  File (echo [this] (log/debug "Received" (str) this))
+  File (echo [this] (log/debug "Received" (str this)))
   Trail (echo [{:keys [channel] :as this}] (log/debug "Received" (str this))
           {:status 200 :channel channel :headers {:content-type "text/plain; charset=utf-8"}})
   Text (echo [this] (log/debug "Echoing text") this)
@@ -83,8 +83,7 @@
                             {:http-client http :throw-exceptions? false
                              :form-params {:field1 "val1" :field2 "val2"}})))
         "Simple form request works."))
-    ; FIXME not deterministic, sometimes need to introduce tests individually?
-    (testing "angry http"
+    (testing "angry http" ; FIXME keep eye out for ResourceLeakDetector reports
       (is (= 413 (:status (hc/post (str "http://localhost:" port "/post-massive-form-urlencoded")
                             {:http-client http :throw-exceptions? false
                              :form-params {:bigfield1 long-text :bigfield2 binary}})))
@@ -109,7 +108,12 @@
                             {:http-client http :throw-exceptions? false
                              :content-type :transit+json
                              :form-params {:transit1 12345 :transit2 ["ugh" "blah"]}})))
-        "Simple post with json works."))
+        "Simple post with transit works.")
+      (is (= 200 (:status (hc/post (str "http://localhost:" port "/post-binary")
+                            {:http-client http :throw-exceptions? false
+                             :content-type :octet-stream
+                             :body binary})))
+        "Simple post with binary works."))
     (testing "ws"
       (is (= short-text (when (async/put! (ws :out) short-text) (read!!)))
         "Short text WS roundtrip works.")

@@ -112,9 +112,9 @@
 (defrecord File [channel name charset content-type transfer-encoding file? value]
   Object
   (toString [r]
-    (str "<File " \" name \"
-      (if file? (str "written to disk at " (.getPath ^java.io.File value))
-                "kept in memory because small") " from " (on r) \>)))
+    (str "<File " \" name \" \space content-type
+      (if file? (str " written to disk at " (.getPath ^java.io.File value))
+                " kept in memory because small") " from " (on r) \>)))
 ; trailing headers ; NB if echoing file, should delay cleanup until fully sent
 (s/def ::Trail (s/keys :req-un [:talk.server/channel ::cleanup ::headers]))
 (defrecord Trail [channel cleanup headers]
@@ -161,7 +161,7 @@
   "Send HTTP response, and manage keep-alive and content-length.
    Fires channel read (provides backpressure) on success if keep-alive."
   [^ChannelHandlerContext ctx keep-alive? ^FullHttpResponse res]
-  (log/debug "Responding in" (ess ctx) (when keep-alive? "(keep-alive)") "with" (ess res))
+  #_(log/debug "Responding in" (ess ctx) (when keep-alive? "(keep-alive)") "with" (ess res))
   (let [status (.status res)
         ; TODO do any other codes merit keep-alive?
         ok-or-continue? (contains? #{HttpResponseStatus/OK HttpResponseStatus/CONTINUE} status)
@@ -430,6 +430,8 @@
           protocol (.protocolVersion this)
           headers (.headers this)
           content-type (some-> this HttpUtil/getMimeType str/lower-case)
+          content-length (try (HttpUtil/getContentLength this)
+                              (catch NumberFormatException _))
           charset (HttpUtil/getCharset this CharsetUtil/UTF_8)
           keep-alive? (HttpUtil/isKeepAlive this)
           method (-> this .method .toString str/lower-case keyword)
@@ -441,7 +443,7 @@
                            (catch HttpPostRequestDecoder$ErrorDataDecoderException e
                              (log/warn "Error setting up POST decoder" e)
                              (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)))
-                      (fake-decoder content-type max-content-length charset))
+                      (fake-decoder content-type content-length max-content-length charset))
                     ; Not accepting body for other methods
                     nil)]
       (assoc wch :decoder decoder
@@ -452,11 +454,9 @@
         (do (log/warn (-> this .decoderResult .cause .getMessage))
             (short-circuit out id HttpResponseStatus/BAD_REQUEST))
 
-        ; (cast Long 0) worked but (long 0) didn't! maybe...
-        ; https://stackoverflow.com/questions/12586881
+        ; https://stackoverflow.com/questions/12586881 Long weirdness
         ; FIXME vulnerable to reported < actual content length
-        (> (HttpUtil/getContentLength this (cast Long 0))
-           (:max-content-length wch max-content-length))
+        (some-> content-length (> (:max-content-length wch max-content-length)))
         (do (log/info "Too large")
             (short-circuit out id HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE))
 
@@ -490,7 +490,7 @@
         (try (.offer decoder this)
              ; TODO could tally size of actual HttpContents and drop if abusive?
              ; (vs "stated" content length)
-             (log/debug "Offered" this "on" (ess ch))
+             #_(log/debug "Offered" this "on" (ess ch))
              (read-chunkwise! opts ctx)
              (when (instance? LastHttpContent this)
                #_(log/debug "last" (.toString (.content this) (Charset/defaultCharset)))
