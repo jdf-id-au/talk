@@ -34,7 +34,7 @@
 (defmethod message-type Binary [_] ::ws/Binary)
 
 (defn ^ChannelHandler tracker
-  [{:keys [clients] :as opts}]
+  [{:keys [] :as opts}]
   (proxy [SimpleChannelInboundHandler] [HttpObject]
     (channelActive [^ChannelHandlerContext ctx]
         (http/track-channel opts ctx)
@@ -57,7 +57,6 @@
   (log/debug "Starting pipeline")
   (proxy [ChannelInitializer] []
     (initChannel [^SocketChannel ch]
-      ; store state in clients atom instead of using netty's Channel.attr
       (doto (.pipeline ch)
         ; TODO could add handlers selectively according to need (from within the channel)
         (.addLast "http" (HttpServerCodec.

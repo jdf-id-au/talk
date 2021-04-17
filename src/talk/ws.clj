@@ -4,7 +4,7 @@
   (:require [clojure.tools.logging :as log]
             [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close!]]
             [clojure.spec.alpha :as s]
-            [talk.util :refer [on]]
+            [talk.util :refer [on ch-assoc ch-get]]
             [talk.http :refer [->Connection]])
   (:import (io.netty.channel ChannelHandlerContext
                              SimpleChannelInboundHandler ChannelFutureListener ChannelHandler)
@@ -78,7 +78,7 @@
   ; Limited by needing to fit in (half of available) memory because of WebSocketFrameAggregator.
   ; Benefit is application not needing to worry about manual memory management...
   ; Contemplate repurposing or reimplementing simpler MixedAttribute to aggregate to memory vs disk depending on size (and turning off WSFA)
-  [{:keys [in clients] :as opts}]
+  [{:keys [in] :as opts}]
   (log/debug "Starting ws handler")
   (proxy [SimpleChannelInboundHandler] [WebSocketFrame]
     (userEventTriggered [^ChannelHandlerContext ctx evt]
@@ -87,8 +87,8 @@
       (when (instance? WebSocketServerProtocolHandler$HandshakeComplete evt) ; TODO .selectedSubprotocol
         (let [ch (.channel ctx)
               id (.id ch)
-              out-sub (get-in @clients [id :out-sub])]
-          (swap! clients update id assoc :type :ws)
+              out-sub (ch-get ch :out-sub)]
+          (ch-assoc ch :type :ws)
           (when-not (put! in (->Connection id :ws))
             (log/error "Unable to report connection upgrade because in chan is closed"))
           ; first take!, see send! for subsequent

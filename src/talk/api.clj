@@ -16,7 +16,7 @@
            (java.net InetSocketAddress)
            (io.netty.handler.codec.http.multipart DefaultHttpDataFactory)
            (io.netty.handler.codec.http HttpObjectDecoder)
-           (io.netty.channel ChannelFutureListener DefaultChannelId)
+           (io.netty.channel ChannelFutureListener DefaultChannelId Channel)
            (java.nio ByteBuffer)
            (java.io ByteArrayOutputStream)
            (java.nio.channels Channels))
@@ -32,10 +32,6 @@
 #_ (s/exercise ::outgoing)
 #_ (s/exercise ::incoming) ; FIXME have another look at retag and multi-spec (sub-specs work)
 
-; TODO:
-; Routing and much http entirely within next layer up, e.g. jdf/foundation
-; vigorous benchmarking and stress testing
-
 (s/def ::ws-path (s/and string? #(re-matches #"/.*" %))) ; TODO refine
 (s/def ::in-buffer pos-int?)
 (s/def ::out-buffer pos-int?)
@@ -46,7 +42,7 @@
 (s/def ::max-frame-size (s/int-in (* 32 1024) (* 1024 1024)))
 (s/def ::max-message-size (s/int-in (* 32 1024) (* 1024 1024 1024))) ; TODO cover with tests....
 (s/def ::max-chunk-size (s/int-in 1024 (* 1024 1024)))
-(s/def ::max-content-length (s/int-in (* 32 1024) (* 1024 1024 1024))) ; but netty int limit!
+(s/def ::max-content-length (s/int-in (* 32 1024) (* 1024 1024 1024))) ; but netty uses signed 32bit int!
 (s/def ::opts (s/keys :req-un [::in-buffer ::out-buffer ::handler-timeout
                                ::disk-threshold
                                ::handshake-timeout ::max-frame-size ::max-message-size
@@ -55,9 +51,7 @@
 
 (def defaults
   "Starts as `opts` and eventually becomes `channel-opts`.
-   Need to add :ws-path if want websocket.
-   A state map atom `:state` is added in channel-specific initialiser's initChannel.
-   State will include a reference to Netty's ChannelHandlerContext `:ctx`, added in channel-specific handler's channelActive."
+   Need to add :ws-path if want websocket."
   {; Toplevel
    :in-buffer 1 :out-buffer 1 :handler-timeout (* 5 1000)
    ; Aggregation
@@ -72,13 +66,17 @@
 
 (defn server!
   "Bootstrap a Netty server connected to core.async channels:
-    `in` - from which application takes incoming messages (could pub with reference to @clients :type)
+    `in` - from which application takes incoming messages
     `out` - to which application puts outgoing messages
-   Client connections and disconnections appear on `in`.
-   Clients are tracked in `clients` atom which contains a map of ChannelId -> arbitrary metadata map.
+
+   All messages in both directions include the channel id on which they occurred.
+   Metadata is stored using Netty's Channel's AttributeMap.
+   Client connections and disconnections appear on `in` and are tracked in `clients` (a Netty ChannelGroup).
    Clients can be individually evicted (i.e. have their channel closed) using `evict` fn.
    Close server by calling `close`.
-   Specify websocket path with :ws-path opt. No ws if  not specified.
+
+   Specify websocket path with :ws-path opt. No ws if not specified.
+
    Doesn't support Server Sent Events or long polling at present."
   ([port] (server! port {}))
   ([port opts]
@@ -92,10 +90,6 @@
          loop-group (NioEventLoopGroup.)
          ; single threaded executor is for group actions
          channel-group (DefaultChannelGroup. GlobalEventExecutor/INSTANCE)
-         ; channel-group tracks channels but is not flexible enough for client metadata
-         ; therefore store metadata in parallel atom:
-         ; also for administering sub(scription)s
-         clients (atom {})
          in (chan in-buffer) ; messages to application from server's handlers
          out (chan out-buffer ; messages from application
                (filter (fn [msg]
@@ -106,15 +100,15 @@
                            ;  but bad ::ws/... -> ??
                            msg))))
          out-pub (async/pub out :channel) ; ...to server's handler for that netty channel
-         evict (fn [^DefaultChannelId id]
-                 (log/info "Trying to evict" (ess id) #_(-> (get @clients id) (dissoc :out-sub)))
-                 (some-> channel-group (.find id) .close
+         evict (fn [^Channel ch]
+                 (log/info "Trying to evict" (ess ch))
+                 (-> (.close ch)
                    (.addListener
                      (reify ChannelFutureListener
                        (operationComplete [_ f]
                          (if (.isSuccess f)
-                           (log/info "Evicted" (ess id))
-                           (log/warn "Couldn't evict" (ess id))))))))]
+                           (log/info "Evicted" (ess ch))
+                           (log/warn "Couldn't evict" (ess ch))))))))]
      (try (let [bootstrap (doto (ServerBootstrap.)
                             ; TODO any need for separate parent and child groups?
                             (.group loop-group)
@@ -124,7 +118,6 @@
                             (.childHandler (server/pipeline ws-path
                                              (assoc opts
                                                :channel-group channel-group
-                                               :clients clients
                                                :in in :out out
                                                :out-pub out-pub))))
                                                ; avoid dep cycle
@@ -138,7 +131,7 @@
                       (close! in)
                       ; could/should add .sync; makes tests slower to exit
                       (-> loop-group .shutdownGracefully))
-             :port port :path ws-path :in in :out out :clients clients :evict evict})
+             :port port :path ws-path :in in :out out :clients channel-group :evict evict})
           (catch Exception e
             (close! out)
             (close! in)

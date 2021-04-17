@@ -7,11 +7,11 @@
             [clojure.string :as str]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
-            [talk.util :refer [on briefly ess]])
+            [talk.util :refer [on briefly ess ch-assoc ch-get ch-dissoc]])
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
                              ChannelHandlerContext ChannelFutureListener
-                             DefaultFileRegion)
+                             DefaultFileRegion Channel)
            (io.netty.handler.codec.http HttpUtil
                                         DefaultFullHttpResponse DefaultHttpResponse
                                         HttpResponseStatus
@@ -110,33 +110,35 @@
 (defrecord Trail [channel cleanup headers]
   Object (toString [r] (str "<Trail " headers \>)))
 
-; Maintain clients registry
+; Register connections
 
 (defn track-channel
-  "Register channel in `clients` map and report on `in` chan.
-   Map entry is a map containing `type`, `out-sub` and `addr`, and can be updated.
+  "Register channel in channel-group.
+   Subscribe channel to its topic on application out chan (published by channel id).
+   Set channel attributes.
+   Report Connection on in chan.
 
    Usage:
    - Call from channelActive.
-   - Detect websocket upgrade handshake, using userEventTriggered, and update `clients` map."
-  [{:keys [^ChannelGroup channel-group clients in out-pub]} ctx]
+   - Detect websocket upgrade handshake, using userEventTriggered, and update `:type` attribute."
+  [{:keys [^ChannelGroup channel-group in out-pub]} ^ChannelHandlerContext ctx]
   (let [ch (.channel ctx)
         id (.id ch)
         cf (.closeFuture ch)
         out-sub (chan)]
     (try (.add channel-group ch)
          (async/sub out-pub id out-sub)
-         (swap! clients assoc id
-           {:ctx ctx
-            :type :http ; changed in userEventTriggered
-            :out-sub out-sub
-            :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp)})
+         (ch-assoc ch
+           :type :http ; changed in userEventTriggered
+           :out-sub out-sub
+           ; slightly superfluous cache of value
+           :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp))
          (when-not (put! in (->Connection id :http))
            (log/error "Unable to report connection because in chan is closed"))
          (.addListener cf
            (reify ChannelFutureListener
              (operationComplete [_ _]
-               (when-not (put! in (->Connection id nil) (fn [_] (swap! clients dissoc id)))
+               (when-not (put! in (->Connection id nil))
                  (log/error "Unable to report disconnection because in chan is closed")))))
          (catch Exception e
            (log/error "Unable to register channel" ch e)
@@ -205,12 +207,13 @@
    Send application's response to client with a backpressure-maintaning effect function.
    POST/PUT/PATCH requests are actually not fully read until application approves them with status 102;
    this status is intercepted here and causes channel read rather than being sent to client."
-  [{:keys [clients handler-timeout] :as opts} id]
-  (let [{:keys [^ChannelHandlerContext ctx ^HttpVersion protocol keep-alive?]} (get @clients id)
-        ^HttpVersion protocol (or protocol HttpVersion/HTTP_1_1)
+  [{:keys [handler-timeout] :as opts} ^ChannelHandlerContext ctx]
+  (let [ch (.channel ctx)
         closed (chan)
         _ (async/close! closed)
-        out-sub (get-in @clients [id :out-sub] closed)] ; default to closed chan if out-sub closed
+        out-sub (or (ch-get ch :out-sub) closed) ; default to closed chan if out-sub closed
+        ^HttpVersion protocol (or (ch-get ch :protocol) HttpVersion/HTTP_1_1)
+        keep-alive? (ch-get ch :keep-alive?)]
     (go
       (try
         (let [{:keys [status headers cookies content] :as res}
@@ -219,10 +222,10 @@
               ^HttpResponseStatus status (if (int? status) (HttpResponseStatus/valueOf status) status)]
           (case res
             ::timeout
-            (do (log/error "Sent no http response on" (ess id) "because of out chan timeout")
+            (do (log/error "Sent no http response on" (ess ch) "because of out chan timeout")
                 (emergency! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))
             nil
-            (do (log/warn "Sent no http response on" (ess id) "because out chan closed")
+            (do (log/warn "Sent no http response on" (ess ch) "because out chan closed")
                 (emergency! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))
             (do
               #_(log/debug "Trying to send" (ess res))
@@ -287,15 +290,16 @@
 
 (defn read-chunkwise!
   "Read from HttpPostDecoder or fire channel read if partial data."
-  [{:keys [clients in] :as opts} id]
+  [{:keys [in] :as opts} ^ChannelHandlerContext ctx]
   ; TODO work out how to indicate logged errors in while loop to user. Throw and catch? Cleanup? `code!`?
-  (let [^HttpPostRequestDecoder decoder (get-in @clients [id :decoder])
-        ^ChannelHandlerContext ctx (get-in @clients [id :ctx])]
+  (let [ch (.channel ctx)
+        id (.id ch)
+        ^HttpPostRequestDecoder decoder (ch-get ch :decoder)]
     (try
       (while (.hasNext decoder)
         (log/debug "decoder has next")
         (when-let [^InterfaceHttpData data (.next decoder)]
-          (when (= data (get-in @clients [id :partial])) (swap! clients update id dissoc :partial))
+          (when (= data (ch-get ch :partial)) (ch-dissoc ch :partial))
           (condp = (.getHttpDataType data)
             InterfaceHttpData$HttpDataType/Attribute
             (let [^io.netty.handler.codec.http.multipart.Attribute d data ; longhand to avoid clash
@@ -319,8 +323,7 @@
       (when-let [^InterfaceHttpData data (.currentPartialHttpData decoder)]
         (log/debug "partial decoding")
         (.read ctx)
-        (when-not (get-in @clients [id :partial])
-          (swap! clients update id assoc :partial data)))
+        (when-not (ch-get ch :partial) (ch-assoc ch :partial data)))
           ; TODO could do finer-grained logging/events etc
       (catch HttpPostRequestDecoder$EndOfDataDecoderException e
         (log/info (type e) (some->> e .getMessage (briefly 120)))))))
@@ -402,7 +405,7 @@
       "Please remove HttpObjectAggregator from pipeline." this))
 
   HttpRequest
-  (read! [this ctx {:keys [clients data-factory out max-content-length] :as opts}]
+  (read! [this ctx {:keys [data-factory out max-content-length] :as opts}]
     (let [ch (.channel ctx)
           id (.id ch)
           protocol (.protocolVersion this)
@@ -417,7 +420,9 @@
                            (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)))
                     ; Not accepting body for other methods
                     nil)]
-      (swap! clients update id assoc :decoder decoder :protocol protocol :keep-alive? keep-alive?)
+      (ch-assoc ch :decoder decoder
+                   :protocol protocol
+                   :keep-alive? keep-alive?)
       (cond
         (-> this .decoderResult .isSuccess not)
         (do (log/warn (-> this .decoderResult .cause .getMessage))
@@ -427,7 +432,7 @@
         ; https://stackoverflow.com/questions/12586881
         ; FIXME vulnerable to reported < actual content length
         (> (HttpUtil/getContentLength this (cast Long 0))
-           (get-in @clients [id :max-content-length] max-content-length))
+           (or (ch-get ch :max-content-length) max-content-length))
         (do (log/info "Too large")
             (short-circuit out id HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE))
 
@@ -451,16 +456,16 @@
 
   ; FIXME work out exactly what HttpPostStandardRequestDecoder wants (non-multipart) wrt headers etc.
 
-  (read! [this ctx {:keys [clients out in] :as opts}]
+  (read! [this ctx {:keys [out in] :as opts}]
     (let [ch (.channel ctx)
           id (.id ch)
-          decoder (get-in @clients [id :decoder])
-          cleanup (fn [] (.destroy decoder) (swap! clients update id dissoc :decoder))]
+          decoder (ch-get ch :decoder)
+          cleanup (fn [] (.destroy decoder) (ch-dissoc ch :decoder))]
       (if decoder
         (try (.offer decoder this)
              ; TODO could tally size of actual HttpContents and drop if abusive?
              ; (vs "stated" content length)
-             (read-chunkwise! opts id)
+             (read-chunkwise! opts ctx)
              (when (instance? LastHttpContent this)
                (or (async/put! in
                      (->Trail id cleanup
@@ -481,7 +486,7 @@
 (defn ^ChannelHandler handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
   ; TODO read about HTTP/2 https://developers.google.com/web/fundamentals/performance/http2
-  [{:keys [clients disk-threshold] :as opts}]
+  [{:keys [disk-threshold] :as opts}]
   #_(log/debug "Starting http handler")
   (let [opts (assoc opts :data-factory (DefaultHttpDataFactory. ^long disk-threshold))]
     (set! (. DiskFileUpload deleteOnExitTemporaryFile) true) ; same as default
@@ -492,7 +497,7 @@
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
         (log/debug "Received" (ess obj))
         (when (read! obj ctx opts)
-          (responder opts (-> ctx .channel .id)))
+          (responder opts ctx))
         #_(log/debug "End of http/handler."))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
         (let [ch (.channel ctx)
@@ -501,5 +506,5 @@
             "Connection reset by peer" (log/info cause)
             (do (log/error "Error in http handler" cause)
                 (emergency! ctx HttpResponseStatus/INTERNAL_SERVER_ERROR)))
-          (some-> ^HttpPostRequestDecoder (get-in @clients [id :decoder]) .destroy))
+          (some-> ^HttpPostRequestDecoder (ch-get ch :decoder) .destroy))
         (.close ctx)))))

@@ -59,7 +59,7 @@
 (deftest echo-test
   (let [{:keys [clients port path close evict] :as server} @test-server
         {:keys [http ws]} @test-clients ; opening ws client should actually connect to server
-        ws-client-id (-> @clients keys first)
+        ws-client-ch (first clients)
         _ (echo-application server)
         ;read!! #(alt!! (ws :in) ([v] v) (async/timeout 100) nil) ; hangs whole IDE when trying to view error report?!
         read!! #(<!! (ws :in)) ; just hangs REPL mid-test (still closable)
@@ -72,7 +72,7 @@
         ; Something to do with client behaviour?
         long-text (apply str (repeatedly (* 512 1024) #(char (rand-int 255))))
         binary (byte-array (repeatedly (* 64 1024) #(rand-int 255)))]
-    (is (contains? @clients ws-client-id)
+    (is (contains? clients ws-client-ch)
       "Clients registry contains websocket client channel.")
     (testing "http"
       (is (= 200 (:status (hc/get (str "http://localhost:" port "/") {:http-client http})))
@@ -87,7 +87,7 @@
       (is (= (seq binary) (seq (when (async/put! (ws :out) binary) (read!!))))
         "Binary WS roundtrip works."))
     (testing "clients registry"
-      (is (nil? (-> ws-client-id evict deref))
+      (is (nil? (-> ws-client-ch evict deref))
         "(Evicting websocket client)")
-      (is (not (contains? @clients ws-client-id))
+      (is (not (contains? clients ws-client-ch))
         "Client registry no longer contains websocket client channel."))))
