@@ -35,12 +35,16 @@
 
 (extend-protocol Echo
   Connection (echo [this] #_(log/debug (ess this)))
-  Request (echo [this]
-            {:status 200 :headers {:content-encoding "text/plain"}
-             :content (str this) :channel (:channel this)})
+  Request (echo [{:keys [channel method] :as this}]
+            (case method
+              (:post :put :patch)
+              {:status 102 :channel channel}
+              {:status 200 :headers {:content-type "text/plain; charset=utf-8"}
+               :content (str this) :channel channel}))
   Attribute (echo [this] (log/debug "Received" (str this)))
-  File (echo [this] (log/debug "Received" this))
-  Trail (echo [this] #_(log/debug "Received" this))
+  File (echo [this] (log/debug "Received" (str) this))
+  Trail (echo [{:keys [channel] :as this}] (log/debug "Received" (str this))
+          {:status 200 :channel channel :headers {:content-type "text/plain; charset=utf-8"}})
   Text (echo [this] (log/debug "Echoing text") this)
   Binary (echo [this] (log/debug "Echoing binary") this))
 

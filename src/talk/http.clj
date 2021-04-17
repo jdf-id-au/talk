@@ -118,7 +118,7 @@
 ; trailing headers ; NB if echoing file, should delay cleanup until fully sent
 (s/def ::Trail (s/keys :req-un [:talk.server/channel ::cleanup ::headers]))
 (defrecord Trail [channel cleanup headers]
-  Object (toString [r] (str "<Trail " headers \>)))
+  Object (toString [r] (str "<Trail from " (on r) (when headers (str \space headers)) \>)))
 
 ; Register connections
 
@@ -240,30 +240,28 @@
               (do (log/warn "Sent no http response on" (ess ch) "because out chan closed")
                   (emergency! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))
               (log/debug "Out chan closed and so is" (ess ch) ". Why am I worrying?"))
-            (do
-              #_(log/debug "Trying to send" (ess res))
-              (case status 102 (.read ctx)
-                (if (instance? java.io.File content)
-                  ; TODO add support for other streaming sources (use protocols?)
-                  ; Streaming:
-                  (let [res (DefaultHttpResponse. protocol status)
-                        hdrs (.headers res)]
-                    (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
-                    (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
-                      (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
-                    (stream! ctx keep-alive? res content))
-                  ; Non-streaming:
-                  (let [buf (condp #(%1 %2) content
-                             string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
-                             nil? Unpooled/EMPTY_BUFFER
-                             bytes? (Unpooled/copiedBuffer ^bytes content))
-                        res (DefaultFullHttpResponse. protocol status ^ByteBuf buf)
-                        hdrs (.headers res)]
-                    (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
-                    ; TODO need to support repeated headers (other than Set-Cookie ?)
-                    (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
-                      (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
-                    (respond! ctx keep-alive? res)))))))
+            (case (.code status) 102 (.read ctx)
+              (if (instance? java.io.File content)
+                ; TODO add support for other streaming sources (use protocols?)
+                ; Streaming:
+                (let [res (DefaultHttpResponse. protocol status)
+                      hdrs (.headers res)]
+                  (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
+                  (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
+                    (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
+                  (stream! ctx keep-alive? res content))
+                ; Non-streaming:
+                (let [buf (condp #(%1 %2) content
+                           string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
+                           nil? Unpooled/EMPTY_BUFFER
+                           bytes? (Unpooled/copiedBuffer ^bytes content))
+                      res (DefaultFullHttpResponse. protocol status ^ByteBuf buf)
+                      hdrs (.headers res)]
+                  (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
+                  ; TODO need to support repeated headers (other than Set-Cookie ?)
+                  (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
+                    (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
+                  (respond! ctx keep-alive? res))))))
         (catch Exception e
           (log/error "Error in http response handler" e)
           (emergency! ctx HttpResponseStatus/INTERNAL_SERVER_ERROR))))))
@@ -309,10 +307,17 @@
         wch (wrap-channel ch)
         id (.id ch)
         ^InterfaceHttpPostRequestDecoder decoder (:decoder wch)]
-    (try
-      (while (.hasNext decoder)
-        #_(log/debug "decoder has next")
-        (when-let [^InterfaceHttpData data (.next decoder)]
+    (while (try (.hasNext decoder)
+                (catch HttpPostRequestDecoder$EndOfDataDecoderException e
+                  (if (.currentPartialHttpData decoder)
+                    (log/debug "End of data exception in" (ess id) "at .hasNext with partial")
+                    (log/debug "Confusing end of data exception in" (ess id) decoder))))
+      (if-let [^InterfaceHttpData data
+               (try (.next decoder)
+                    (catch HttpPostRequestDecoder$EndOfDataDecoderException e
+                      (log/debug "End of data exception in" (ess id) "at .next")))]
+        (do
+          #_(log/debug "Got" data "in" (ess id))
           (when (= data (:partial wch)) (dissoc wch :partial))
           (condp = (.getHttpDataType data)
             InterfaceHttpData$HttpDataType/Attribute
@@ -333,15 +338,13 @@
                               file? (if file? (.getFile d) (.get d))))
                   (log/error "Dropped incoming POST file because in chan is closed"))
                 (log/info "Dropped incoming POST file because upload incomplete")))
-            (log/info "Dropped incoming POST data because unrecognised type"))))
-      (when-let [^InterfaceHttpData data (.currentPartialHttpData decoder)]
-        #_(log/debug "partial decoding" data)
-        (.read ctx)
-        (when-not (:partial wch) (assoc wch :partial data)))
-          ; TODO could do finer-grained logging/events etc
-      (catch HttpPostRequestDecoder$EndOfDataDecoderException e
-        ; Is this just droppable?
-        #_(log/info (type e) (:partial wch))))))
+            (log/info "Dropped incoming POST data because unrecognised type")))
+        (log/debug ".next returned nil in" (ess id))))
+    (when-let [^InterfaceHttpData data (.currentPartialHttpData decoder)]
+      #_(log/debug "partial decoding" data)
+      (.read ctx)
+      (when-not (:partial wch) (assoc wch :partial data)))))
+        ; TODO could do finer-grained logging/events etc
 
 (defmulti ask-to!
   "Allows unacceptable requests to be stopped in flight, e.g. to prevent abusive POST.
@@ -483,11 +486,11 @@
           id (.id ch)
           decoder (:decoder wch)
           cleanup (fn [] (.destroy decoder) (dissoc wch :decoder))]
-      (when decoder
-        #_(log/debug "offering" this)
+      (if decoder
         (try (.offer decoder this)
              ; TODO could tally size of actual HttpContents and drop if abusive?
              ; (vs "stated" content length)
+             (log/debug "Offered" this "on" (ess ch))
              (read-chunkwise! opts ctx)
              (when (instance? LastHttpContent this)
                #_(log/debug "last" (.toString (.content this) (Charset/defaultCharset)))
@@ -503,10 +506,9 @@
                (log/warn "Error running POST decoder" (some->> e .getMessage (briefly 120)))
                (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY))
              (catch IllegalStateException e
-               (log/debug "Tried to write to destroyed decoder" e))))
-      (if-not decoder
+               (log/debug "Tried to write to destroyed decoder" e)))
         ; Ignore EmptyLastHttpContent following requests with methods which we don't allow to have body.
-        (log/debug "Dropped" this "because no decoder. Does method support body?")))))
+        #_(log/debug "Dropped" this "because no decoder. Does method support body?")))))
 
 (defn ^ChannelHandler handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
@@ -520,7 +522,7 @@
     (set! (. DiskAttribute baseDirectory) nil)
     (proxy [SimpleChannelInboundHandler] [HttpObject]
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
-        (some->> obj ess (log/debug "Received"))
+        (some->> obj ess (log/debug "Received on" (ess ctx)))
         (when (read! obj ctx opts)
           (responder opts ctx))
         #_(log/debug "End of http/handler."))
