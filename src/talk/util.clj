@@ -59,10 +59,14 @@
     (valAt [this k default]
       (or (.valAt this k) default))
     IPersistentMap ; extends Iterable, Associative, Counted;
-    (assocEx [_ k v] (if-not (.get (.attr channel (attribute-key k)))
-                       (.set (.attr channel (attribute-key k)) v)
-                       (throw (RuntimeException. "Key already present"))))
-    (without [_ k] (.set (.attr channel (attribute-key k)) nil))
+    (assocEx [this k v]
+      (if-not (.get (.attr channel (attribute-key k)))
+        (.set (.attr channel (attribute-key k)) v)
+        (throw (RuntimeException. "Key already present")))
+      this)
+    (without [this k]
+      (.set (.attr channel (attribute-key k)) nil)
+      this)
     ; Iterable:
     (iterator [_] (unsupported "This is a wrapped io.netty.channel.Channel. No iterator."))
     ;(forEach [_ _] (unsupported "This is a wrapped io.netty.channel.Channel. No forEach."))
@@ -72,9 +76,9 @@
       (boolean (.hasAttr channel (attribute-key k))))
     (entryAt [_ k]
       (.get (.attr channel (attribute-key k))))
-    (assoc [_ k v]
-      (log/debug "wc assoc" k v "for" (.id channel))
-      (.set (.attr channel (attribute-key k)) v))
+    (assoc [this k v]
+      (.set (.attr channel (attribute-key k)) v)
+      this)
     ; Counted:
     (count [_] (unsupported "This is a wrapped io.netty.channel.Channel. No count."))))
 

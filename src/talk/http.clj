@@ -129,12 +129,10 @@
         out-sub (chan)]
     (try (.add channel-group ch)
          (async/sub out-pub id out-sub)
-         ; NB have to assoc one key at a time because wrapped impl unable to return map
-         ; FIXME maybe have hidden impl map-in-atom? Wouldn't take up much space, but redundant...
-         (assoc wch :type :http) ; changed in userEventTriggered
-         (assoc wch :out-sub out-sub)
+         (assoc wch :type :http ; changed in userEventTriggered
+           :out-sub out-sub
          ; slightly superfluous cache of value
-         (assoc wch :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp))
+           :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp))
          (when-not (put! in (->Connection id :http))
            (log/error "Unable to report connection because in chan is closed"))
          (.addListener cf
@@ -425,9 +423,9 @@
                            (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)))
                     ; Not accepting body for other methods
                     nil)]
-      (assoc wch :decoder decoder)
-      (assoc wch :protocol protocol)
-      (assoc wch :keep-alive? keep-alive?)
+      (assoc wch :decoder decoder
+                 :protocol protocol
+                 :keep-alive? keep-alive?)
       (cond
         (-> this .decoderResult .isSuccess not)
         (do (log/warn (-> this .decoderResult .cause .getMessage))
