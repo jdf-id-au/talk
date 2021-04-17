@@ -4,7 +4,7 @@
   (:require [clojure.tools.logging :as log]
             [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close!]]
             [clojure.spec.alpha :as s]
-            [talk.util :refer [on ch-assoc ch-get]]
+            [talk.util :refer [on wrap-channel]]
             [talk.http :refer [->Connection]])
   (:import (io.netty.channel ChannelHandlerContext
                              SimpleChannelInboundHandler ChannelFutureListener ChannelHandler)
@@ -86,9 +86,10 @@
       ; https://stackoverflow.com/a/36421052/780743
       (when (instance? WebSocketServerProtocolHandler$HandshakeComplete evt) ; TODO .selectedSubprotocol
         (let [ch (.channel ctx)
+              wch (wrap-channel ch)
               id (.id ch)
-              out-sub (ch-get ch :out-sub)]
-          (ch-assoc ch :type :ws)
+              out-sub (:out-sub wch)]
+          (assoc wch :type :ws)
           (when-not (put! in (->Connection id :ws))
             (log/error "Unable to report connection upgrade because in chan is closed"))
           ; first take!, see send! for subsequent

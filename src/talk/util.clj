@@ -1,5 +1,6 @@
 (ns talk.util
   "Edited highlights from jdf/comfort, to avoid dep."
+  (:require [clojure.tools.logging :as log])
   (:import (io.netty.channel ChannelId ChannelHandlerContext Channel)
            (io.netty.handler.codec.http HttpRequest HttpResponse)
            (io.netty.util AttributeKey)
@@ -40,63 +41,45 @@
   nil
   (ess [this] "nil?!"))
 
-(defprotocol ChannelAtomic
-  (-ch-assoc [this kvs])
-  (ch-get [this k]
-    "Treat Netty Channel a bit like a clojure map-in-atom via its AttributeMap interface.
-     Like get but can't distinguish between 'contains nil' and 'not found'.")
-  ;(ch-update [this k f])
-  (-ch-dissoc [this ks]))
-
-(defn ch-assoc
-  "Treat Netty Channel a bit like a clojure map-in-atom via its AttributeMap interface.
-   Like assoc but doesn't return map."
-  ; workaround no varargs in defprotocol
-  ([this k v] (-ch-assoc this (list [k v])))
-  ([this k v & kvs]
-   (assert (even? (count kvs)))
-   (-ch-assoc this (cons [k v] (partition 2 kvs)))))
-
-(defn ch-dissoc
-  "Treat Netty Channel a bit like a clojure map-in-atom via its AttributeMap interface.
-   Like dissoc but doesn't return map."
-  ; workaround no varargs in defprotocol
-  ([this & ks] (-ch-dissoc this ks)))
-
 (defn attribute-key [kw]
   (AttributeKey/valueOf (name kw)))
 
-(extend-protocol ChannelAtomic
-  Channel
-  (-ch-assoc [this kvs]
-    (doseq [[k v] kvs] (.set (.attr this (attribute-key k)) v)))
-  (ch-get [this k]
-    (.get (.attr this (attribute-key k))))
-  (-ch-dissoc [this ks]
-    (doseq [k ks] (.set (.attr this (attribute-key k)) nil))))
-
-(defn unsupported [^String msg] (throw (UnsupportedOperationException. msg)))
+(defn unsupported
+  ([] (throw (UnsupportedOperationException.)))
+  ([^String msg] (throw (UnsupportedOperationException. msg))))
 
 (defn wrap-channel
-  "Make io.netty.channel.Channel look like a clojure map of the Channel's AttributeMap.
-   Only supports plain keyword keys."
+  "Make io.netty.channel.Channel look a bit like a clojure map of the Channel's AttributeMap.
+   Only supports plain keyword keys. Doesn't distinguish between Attribute with nil value and absent attribute."
   [^Channel channel]
   (reify
     ILookup
     (valAt [_ k]
-      (.attr channel (attribute-key k)))
+      (.get (.attr channel (attribute-key k))))
     (valAt [this k default]
       (or (.valAt this k) default))
-    Associative
+    IPersistentMap ; extends Iterable, Associative, Counted;
+    (assocEx [_ k v] (if-not (.get (.attr channel (attribute-key k)))
+                       (.set (.attr channel (attribute-key k)) v)
+                       (throw (RuntimeException. "Key already present"))))
+    (without [_ k] (.set (.attr channel (attribute-key k)) nil))
+    ; Iterable:
+    (iterator [_] (unsupported "This is a wrapped io.netty.channel.Channel. No iterator."))
+    ;(forEach [_ _] (unsupported "This is a wrapped io.netty.channel.Channel. No forEach."))
+    ;(spliterator [_] (unsupported "This is a wrapped io.netty.channel.Channel. No spliterator."))
+    ; Associative:
     (containsKey [_ k]
       (boolean (.hasAttr channel (attribute-key k))))
     (entryAt [_ k]
       (.get (.attr channel (attribute-key k))))
     (assoc [_ k v]
-      (.set (.attr channel (attribute-key k)) v))))
+      (log/debug "wc assoc" k v "for" (.id channel))
+      (.set (.attr channel (attribute-key k)) v))
+    ; Counted:
+    (count [_] (unsupported "This is a wrapped io.netty.channel.Channel. No count."))))
 
 (defn wrap-channel-group
-  "Make io.netty.channel.group.ChannelGroup look like a clojure map of `ChannelId` -> `Channel`.
+  "Make io.netty.channel.group.ChannelGroup look a bit like a clojure map of `ChannelId` -> `Channel`.
    Each `Channel` is wrapped with `wrap-channel`."
   ; It's already a java.util.Set<io.netty.channel.Channel>.
   ; Don't want to bring in clj-commons/potemkin for def-map-type!
@@ -125,14 +108,14 @@
     (valAt [_ k]
       (some-> (.find channel-group k) wrap-channel))
     (valAt [_ _ _]
-      (unsupported "This is a wrapped io.netty.channel.group.ChannelGroup."))
+      (unsupported "This is a wrapped io.netty.channel.group.ChannelGroup. Meaningless to give default."))
     Associative
     (containsKey [_ k]
       (boolean (.find channel-group k)))
     (entryAt [_ k]
       (some-> (.find channel-group k) wrap-channel))
     (assoc [_ k v]
-      (unsupported "This is a wrapped io.netty.channel.group.ChannelGroup."))))
+      (unsupported "This is a wrapped io.netty.channel.group.ChannelGroup. Meaningless to assoc."))))
     ;IObj
     ; (withMeta [_ _] (unsupported)))))
     ;IFn ; holy crap too many methods

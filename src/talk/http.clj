@@ -7,7 +7,7 @@
             [clojure.string :as str]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
-            [talk.util :refer [on briefly ess ch-assoc ch-get ch-dissoc]])
+            [talk.util :refer [on briefly ess wrap-channel]])
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
                              ChannelHandlerContext ChannelFutureListener
@@ -123,16 +123,18 @@
    - Detect websocket upgrade handshake, using userEventTriggered, and update `:type` attribute."
   [{:keys [^ChannelGroup channel-group in out-pub]} ^ChannelHandlerContext ctx]
   (let [ch (.channel ctx)
+        wch (wrap-channel ch)
         id (.id ch)
         cf (.closeFuture ch)
         out-sub (chan)]
     (try (.add channel-group ch)
          (async/sub out-pub id out-sub)
-         (ch-assoc ch
-           :type :http ; changed in userEventTriggered
-           :out-sub out-sub
-           ; slightly superfluous cache of value
-           :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp))
+         ; NB have to assoc one key at a time because wrapped impl unable to return map
+         ; FIXME maybe have hidden impl map-in-atom? Wouldn't take up much space, but redundant...
+         (assoc wch :type :http) ; changed in userEventTriggered
+         (assoc wch :out-sub out-sub)
+         ; slightly superfluous cache of value
+         (assoc wch :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp))
          (when-not (put! in (->Connection id :http))
            (log/error "Unable to report connection because in chan is closed"))
          (.addListener cf
@@ -209,11 +211,12 @@
    this status is intercepted here and causes channel read rather than being sent to client."
   [{:keys [handler-timeout] :as opts} ^ChannelHandlerContext ctx]
   (let [ch (.channel ctx)
+        wch (wrap-channel ch)
         closed (chan)
         _ (async/close! closed)
-        out-sub (or (ch-get ch :out-sub) closed) ; default to closed chan if out-sub closed
-        ^HttpVersion protocol (or (ch-get ch :protocol) HttpVersion/HTTP_1_1)
-        keep-alive? (ch-get ch :keep-alive?)]
+        out-sub (:out-sub wch closed) ; default to closed chan if out-sub closed
+        ^HttpVersion protocol (:protocol wch HttpVersion/HTTP_1_1)
+        keep-alive? (:keep-alive? wch)]
     (go
       (try
         (let [{:keys [status headers cookies content] :as res}
@@ -293,13 +296,14 @@
   [{:keys [in] :as opts} ^ChannelHandlerContext ctx]
   ; TODO work out how to indicate logged errors in while loop to user. Throw and catch? Cleanup? `code!`?
   (let [ch (.channel ctx)
+        wch (wrap-channel ch)
         id (.id ch)
-        ^HttpPostRequestDecoder decoder (ch-get ch :decoder)]
+        ^HttpPostRequestDecoder decoder (:decoder wch)]
     (try
       (while (.hasNext decoder)
         (log/debug "decoder has next")
         (when-let [^InterfaceHttpData data (.next decoder)]
-          (when (= data (ch-get ch :partial)) (ch-dissoc ch :partial))
+          (when (= data (:partial wch)) (dissoc wch :partial))
           (condp = (.getHttpDataType data)
             InterfaceHttpData$HttpDataType/Attribute
             (let [^io.netty.handler.codec.http.multipart.Attribute d data ; longhand to avoid clash
@@ -323,7 +327,7 @@
       (when-let [^InterfaceHttpData data (.currentPartialHttpData decoder)]
         (log/debug "partial decoding")
         (.read ctx)
-        (when-not (ch-get ch :partial) (ch-assoc ch :partial data)))
+        (when-not (:partial wch) (assoc wch :partial data)))
           ; TODO could do finer-grained logging/events etc
       (catch HttpPostRequestDecoder$EndOfDataDecoderException e
         (log/info (type e) (some->> e .getMessage (briefly 120)))))))
@@ -407,6 +411,7 @@
   HttpRequest
   (read! [this ctx {:keys [data-factory out max-content-length] :as opts}]
     (let [ch (.channel ctx)
+          wch (wrap-channel ch)
           id (.id ch)
           protocol (.protocolVersion this)
           headers (.headers this)
@@ -420,9 +425,9 @@
                            (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)))
                     ; Not accepting body for other methods
                     nil)]
-      (ch-assoc ch :decoder decoder
-                   :protocol protocol
-                   :keep-alive? keep-alive?)
+      (assoc wch :decoder decoder)
+      (assoc wch :protocol protocol)
+      (assoc wch :keep-alive? keep-alive?)
       (cond
         (-> this .decoderResult .isSuccess not)
         (do (log/warn (-> this .decoderResult .cause .getMessage))
@@ -432,7 +437,7 @@
         ; https://stackoverflow.com/questions/12586881
         ; FIXME vulnerable to reported < actual content length
         (> (HttpUtil/getContentLength this (cast Long 0))
-           (or (ch-get ch :max-content-length) max-content-length))
+           (:max-content-length wch max-content-length))
         (do (log/info "Too large")
             (short-circuit out id HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE))
 
@@ -458,9 +463,10 @@
 
   (read! [this ctx {:keys [out in] :as opts}]
     (let [ch (.channel ctx)
+          wch (wrap-channel ch)
           id (.id ch)
-          decoder (ch-get ch :decoder)
-          cleanup (fn [] (.destroy decoder) (ch-dissoc ch :decoder))]
+          decoder (:decoder wch)
+          cleanup (fn [] (.destroy decoder) (dissoc wch :decoder))]
       (if decoder
         (try (.offer decoder this)
              ; TODO could tally size of actual HttpContents and drop if abusive?
@@ -501,10 +507,10 @@
         #_(log/debug "End of http/handler."))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
         (let [ch (.channel ctx)
-              id (.id ch)]
+              wch (wrap-channel ch)]
           (case (.getMessage cause)
             "Connection reset by peer" (log/info cause)
             (do (log/error "Error in http handler" cause)
                 (emergency! ctx HttpResponseStatus/INTERNAL_SERVER_ERROR)))
-          (some-> ^HttpPostRequestDecoder (ch-get ch :decoder) .destroy))
+          (some-> ^HttpPostRequestDecoder (:decoder wch) .destroy))
         (.close ctx)))))
