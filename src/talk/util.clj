@@ -75,9 +75,29 @@
   (-ch-dissoc [this ks]
     (doseq [k ks] (.set (.attr this (attribute-key k)) nil))))
 
+(defn unsupported [^String msg] (throw (UnsupportedOperationException. msg)))
+
+(defn wrap-channel
+  "Make io.netty.channel.Channel look like a clojure map of the Channel's AttributeMap.
+   Only supports plain keyword keys."
+  [^Channel channel]
+  (reify
+    ILookup
+    (valAt [_ k]
+      (.attr channel (attribute-key k)))
+    (valAt [this k default]
+      (or (.valAt this k) default))
+    Associative
+    (containsKey [_ k]
+      (boolean (.hasAttr channel (attribute-key k))))
+    (entryAt [_ k]
+      (.get (.attr channel (attribute-key k))))
+    (assoc [_ k v]
+      (.set (.attr channel (attribute-key k)) v))))
+
 (defn wrap-channel-group
-  "Make Netty's `ChannelGroup` look like a clojure map of `ChannelId` -> `Channel`.
-   Make each contained `Channel` look like a clojure map-in-atom (referring to Netty's `AttributeMap`s)."
+  "Make io.netty.channel.group.ChannelGroup look like a clojure map of `ChannelId` -> `Channel`.
+   Each `Channel` is wrapped with `wrap-channel`."
   ; It's already a java.util.Set<io.netty.channel.Channel>.
   ; Don't want to bring in clj-commons/potemkin for def-map-type!
   [^ChannelGroup channel-group]
@@ -85,36 +105,34 @@
   ; IPersistentCollection IPersistentMap Counted Seqable ILookup Associative IObj IFn
   ; Important functions:
   ; get assoc dissoc keys meta with-meta
-  (let [unsupported (UnsupportedOperationException.
-                      "This is a wrapped io.netty.channel.group.ChannelGroup.")]
-    (reify
-      ;IPersistentCollection ; extends Seqable
-      ;(count [_] (count (channel-group)))
-      ;(cons [_ _] (throw unsupported))
-      ;(empty [_] (throw unsupported))
-      ;(equiv [_ _] (throw unsupported))
-      ;IPersistentMap ; extends Iterable, Associative, Counted
-      ;(assoc [_ _ _] (throw unsupported))
-      ;(assocEx [_ _ _] (throw unsupported))
-      ;(without [_ _] (throw unsupported))
-      Counted
-      (count [_]
-        (.size channel-group))
-      Seqable
-      (seq [_]
-        (seq (map (fn [^Channel ch] (MapEntry. (.id ch) ch)) channel-group)))
-      ILookup
-      (valAt [_ k]
-        (.find channel-group k))
-      (valAt [this k default]
-        (or (.valAt this k) default))
-      Associative
-      (containsKey [_ k]
-        (boolean (.find channel-group k)))
-      (entryAt [_ k]
-        (.find channel-group k))
-      (assoc [_ k v]
-        (throw unsupported)))))
-      ;IObj
-      ;(withMeta [_ _] (throw unsupported)))))
-      ;IFn ; holy crap too many methods
+  (reify
+    ;IPersistentCollection ; extends Seqable
+    ;(count [_] (count (channel-group)))
+    ;(cons [_ _] (unsupported))
+    ;(empty [_] (unsupported))
+    ;(equiv [_ _] (unsupported))
+    ;IPersistentMap ; extends Iterable, Associative, Counted
+    ;(assoc [_ _ _] (unsupported))
+    ;(assocEx [_ _ _] (unsupported))
+    ;(without [_ _] (unsupported))
+    Counted
+    (count [_]
+      (.size channel-group))
+    Seqable
+    (seq [_]
+      (seq (map (fn [^Channel ch] (MapEntry. (.id ch) (wrap-channel ch))) channel-group)))
+    ILookup
+    (valAt [_ k]
+      (some-> (.find channel-group k) wrap-channel))
+    (valAt [_ _ _]
+      (unsupported "This is a wrapped io.netty.channel.group.ChannelGroup."))
+    Associative
+    (containsKey [_ k]
+      (boolean (.find channel-group k)))
+    (entryAt [_ k]
+      (some-> (.find channel-group k) wrap-channel))
+    (assoc [_ k v]
+      (unsupported "This is a wrapped io.netty.channel.group.ChannelGroup."))))
+    ;IObj
+    ; (withMeta [_ _] (unsupported)))))
+    ;IFn ; holy crap too many methods
