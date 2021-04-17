@@ -7,11 +7,11 @@
             [clojure.string :as str]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
-            [talk.util :refer [on briefly ess wrap-channel]])
+            [talk.util :refer [on briefly ess wrap-channel fake-decoder]])
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
                              ChannelHandlerContext ChannelFutureListener
-                             DefaultFileRegion Channel)
+                             DefaultFileRegion)
            (io.netty.handler.codec.http HttpUtil
                                         DefaultFullHttpResponse DefaultHttpResponse
                                         HttpResponseStatus
@@ -27,7 +27,8 @@
                                                   DiskFileUpload DiskAttribute
                                                   HttpPostRequestDecoder$ErrorDataDecoderException
                                                   HttpPostRequestDecoder$EndOfDataDecoderException
-                                                  InterfaceHttpData$HttpDataType FileUpload HttpData)
+                                                  InterfaceHttpData$HttpDataType FileUpload
+                                                  InterfaceHttpPostRequestDecoder)
            (java.io RandomAccessFile)
            (java.net InetSocketAddress)
            (java.nio.charset Charset)
@@ -307,7 +308,7 @@
   (let [ch (.channel ctx)
         wch (wrap-channel ch)
         id (.id ch)
-        ^HttpPostRequestDecoder decoder (:decoder wch)]
+        ^InterfaceHttpPostRequestDecoder decoder (:decoder wch)]
     (try
       (while (.hasNext decoder)
         #_(log/debug "decoder has next")
@@ -425,14 +426,20 @@
           id (.id ch)
           protocol (.protocolVersion this)
           headers (.headers this)
+          content-type (some-> this HttpUtil/getMimeType str/lower-case)
           keep-alive? (HttpUtil/isKeepAlive this)
           method (-> this .method .toString str/lower-case keyword)
           decoder (case method
                     (:put :post :patch)
-                    (try (HttpPostRequestDecoder. data-factory this)
-                         (catch HttpPostRequestDecoder$ErrorDataDecoderException e
-                           (log/warn "Error setting up POST decoder" e)
-                           (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)))
+                    (case content-type
+                      ("application/x-form-www-urlencoded" "multipart/form-data")
+                      (try (HttpPostRequestDecoder. data-factory this)
+                           (catch HttpPostRequestDecoder$ErrorDataDecoderException e
+                             (log/warn "Error setting up POST decoder" e)
+                             (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)))
+                      ; Aim to return a single attribute named after content type
+                      ; TODO pick up encoding?
+                      (fake-decoder content-type max-content-length))
                     ; Not accepting body for other methods
                     nil)]
       (assoc wch :decoder decoder
@@ -525,5 +532,5 @@
             "Connection reset by peer" (log/info cause)
             (do (log/error "Error in http handler" cause)
                 (emergency! ctx HttpResponseStatus/INTERNAL_SERVER_ERROR)))
-          (some-> ^HttpPostRequestDecoder (:decoder wch) .destroy))
+          (some-> ^InterfaceHttpPostRequestDecoder (:decoder wch) .destroy))
         (.close ctx)))))

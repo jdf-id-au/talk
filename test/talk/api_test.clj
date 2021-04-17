@@ -83,11 +83,17 @@
                             {:http-client http :throw-exceptions? false
                              :form-params {:field1 "val1" :field2 "val2"}})))
         "Simple form request works."))
-    (testing "angry http"  ; FIXME not deterministic, sometimes need to introduce tests individually?
+    ; FIXME not deterministic, sometimes need to introduce tests individually?
+    (testing "angry http"
+      (is (= 413 (:status (hc/post (str "http://localhost:" port "/post-massive-form-urlencoded")
+                            {:http-client http :throw-exceptions? false
+                             :form-params {:bigfield1 long-text :bigfield2 binary}})))
+        "Simple form request with two big fields is too big!")
+      ; FIXME not writing attrib to disk! Needs multipart to do that?
       (is (= 200 (:status (hc/post (str "http://localhost:" port "/post-big-form-urlencoded")
                             {:http-client http :throw-exceptions? false
-                             :form-params {:bigfield1 "not big yet" :bigfield2 binary}})))
-        "Simple form request with bigger field works.")
+                             :form-params {:bigfield binary}})))
+        "Simple form request with one big field works.")
       (is (= 200 (:status (hc/post (str "http://localhost:" port "/post-multipart")
                             {:http-client http :throw-exceptions? false
                              :multipart [{:name "multipart1" :content "boring text"}
@@ -98,7 +104,13 @@
       (is (= 200 (:status (hc/post (str "http://localhost:" port "/post-json")
                              {:http-client http :throw-exceptions? false
                               :content-type :json
-                              :form-params {:json1 12345 :json2 ["ugh" "blah"]}})))))
+                              :form-params {:json1 12345 :json2 ["ugh" "blah"]}})))
+        "Simple post with json works.")
+      (is (= 200 (:status (hc/post (str "http://localhost:" port "/post-transit")
+                            {:http-client http :throw-exceptions? false
+                             :content-type :transit+json
+                             :form-params {:transit1 12345 :transit2 ["ugh" "blah"]}})))
+        "Simple post with json works."))
     ; FIXME few errant SUBSEQUENT 503s from closed out chan
     (testing "ws"
       (is (= short-text (when (async/put! (ws :out) short-text) (read!!)))

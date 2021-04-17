@@ -55,7 +55,7 @@
   {; Toplevel
    :in-buffer 1 :out-buffer 1 :handler-timeout (* 5 1000)
    ; Aggregation
-   :disk-threshold DefaultHttpDataFactory/MINSIZE
+   :disk-threshold DefaultHttpDataFactory/MINSIZE ; 16KiB
    ; WebSocket
    :handshake-timeout (* 5 1000) ; netty default not public
    :max-frame-size (* 64 1024)
