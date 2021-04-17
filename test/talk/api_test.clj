@@ -73,7 +73,7 @@
         long-text (apply str (repeatedly (* 512 1024) #(char (rand-int 255))))
         binary (byte-array (repeatedly (* 64 1024) #(rand-int 255)))]
     (is (contains? clients ws-id)
-      "Clients r:egistry contains websocket client channel.")
+      "Clients registry contains websocket client channel.")
     (testing "http"
       (is (= 200 (:status (hc/get (str "http://localhost:" port "/") {:http-client http})))
         "HTTP GET returns status 200.")

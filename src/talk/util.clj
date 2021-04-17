@@ -118,8 +118,9 @@
       (boolean (.find channel-group k)))
     (entryAt [_ k]
       (some-> (.find channel-group k) wrap-channel))
-    (assoc [_ k v]
-      (unsupported "This is a wrapped io.netty.channel.group.ChannelGroup. Meaningless to assoc."))))
+    (assoc [this k v]
+      ; NB Only to allow assoc-in and update-in to work!
+      this)))
     ;IObj
     ; (withMeta [_ _] (unsupported)))))
     ;IFn ; holy crap too many methods

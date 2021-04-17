@@ -130,9 +130,9 @@
     (try (.add channel-group ch)
          (async/sub out-pub id out-sub)
          (assoc wch :type :http ; changed in userEventTriggered
-           :out-sub out-sub
-         ; slightly superfluous cache of value
-           :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp))
+                    :out-sub out-sub
+                    ; slightly superfluous cache of value
+                    :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp))
          (when-not (put! in (->Connection id :http))
            (log/error "Unable to report connection because in chan is closed"))
          (.addListener cf
