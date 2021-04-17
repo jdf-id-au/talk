@@ -2,7 +2,9 @@
   "Edited highlights from jdf/comfort, to avoid dep."
   (:import (io.netty.channel ChannelId ChannelHandlerContext Channel)
            (io.netty.handler.codec.http HttpRequest HttpResponse)
-           (io.netty.util AttributeKey)))
+           (io.netty.util AttributeKey)
+           (io.netty.channel.group ChannelGroup)
+           (clojure.lang IPersistentMap ILookup IPersistentCollection Counted Seqable Associative IObj MapEntry)))
 
 (defn retag
   "spec convenience"
@@ -72,3 +74,47 @@
     (.get (.attr this (attribute-key k))))
   (-ch-dissoc [this ks]
     (doseq [k ks] (.set (.attr this (attribute-key k)) nil))))
+
+(defn wrap-channel-group
+  "Make Netty's `ChannelGroup` look like a clojure map of `ChannelId` -> `Channel`.
+   Make each contained `Channel` look like a clojure map-in-atom (referring to Netty's `AttributeMap`s)."
+  ; It's already a java.util.Set<io.netty.channel.Channel>.
+  ; Don't want to bring in clj-commons/potemkin for def-map-type!
+  [^ChannelGroup channel-group]
+  ; Clojure interfaces which might be needed:
+  ; IPersistentCollection IPersistentMap Counted Seqable ILookup Associative IObj IFn
+  ; Important functions:
+  ; get assoc dissoc keys meta with-meta
+  (let [unsupported (UnsupportedOperationException.
+                      "This is a wrapped io.netty.channel.group.ChannelGroup.")]
+    (reify
+      ;IPersistentCollection ; extends Seqable
+      ;(count [_] (count (channel-group)))
+      ;(cons [_ _] (throw unsupported))
+      ;(empty [_] (throw unsupported))
+      ;(equiv [_ _] (throw unsupported))
+      ;IPersistentMap ; extends Iterable, Associative, Counted
+      ;(assoc [_ _ _] (throw unsupported))
+      ;(assocEx [_ _ _] (throw unsupported))
+      ;(without [_ _] (throw unsupported))
+      Counted
+      (count [_]
+        (.size channel-group))
+      Seqable
+      (seq [_]
+        (seq (map (fn [^Channel ch] (MapEntry. (.id ch) ch)) channel-group)))
+      ILookup
+      (valAt [_ k]
+        (.find channel-group k))
+      (valAt [this k default]
+        (or (.valAt this k) default))
+      Associative
+      (containsKey [_ k]
+        (boolean (.find channel-group k)))
+      (entryAt [_ k]
+        (.find channel-group k))
+      (assoc [_ k v]
+        (throw unsupported)))))
+      ;IObj
+      ;(withMeta [_ _] (throw unsupported)))))
+      ;IFn ; holy crap too many methods

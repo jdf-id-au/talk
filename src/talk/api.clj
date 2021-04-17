@@ -4,7 +4,7 @@
             [talk.server :as server]
             [talk.http :as http]
             [talk.ws :as ws]
-            [talk.util :refer [retag ess]]
+            [talk.util :refer [retag ess wrap-channel-group]]
             [hato.websocket :as hws]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen])
@@ -16,7 +16,7 @@
            (java.net InetSocketAddress)
            (io.netty.handler.codec.http.multipart DefaultHttpDataFactory)
            (io.netty.handler.codec.http HttpObjectDecoder)
-           (io.netty.channel ChannelFutureListener DefaultChannelId Channel)
+           (io.netty.channel ChannelFutureListener DefaultChannelId Channel ChannelId)
            (java.nio ByteBuffer)
            (java.io ByteArrayOutputStream)
            (java.nio.channels Channels))
@@ -71,7 +71,7 @@
 
    All messages in both directions include the channel id on which they occurred.
    Metadata is stored using Netty's Channel's AttributeMap.
-   Client connections and disconnections appear on `in` and are tracked in `clients` (a Netty ChannelGroup).
+   Client connections and disconnections appear on `in` and are tracked in `clients`.
    Clients can be individually evicted (i.e. have their channel closed) using `evict` fn.
    Close server by calling `close`.
 
@@ -100,15 +100,15 @@
                            ;  but bad ::ws/... -> ??
                            msg))))
          out-pub (async/pub out :channel) ; ...to server's handler for that netty channel
-         evict (fn [^Channel ch]
-                 (log/info "Trying to evict" (ess ch))
-                 (-> (.close ch)
+         evict (fn [^ChannelId id]
+                 (log/info "Trying to evict" (ess id))
+                 (some-> channel-group (.find id) .close
                    (.addListener
                      (reify ChannelFutureListener
                        (operationComplete [_ f]
                          (if (.isSuccess f)
-                           (log/info "Evicted" (ess ch))
-                           (log/warn "Couldn't evict" (ess ch))))))))]
+                           (log/info "Evicted" (ess id))
+                           (log/warn "Couldn't evict" (ess id))))))))]
      (try (let [bootstrap (doto (ServerBootstrap.)
                             ; TODO any need for separate parent and child groups?
                             (.group loop-group)
@@ -131,7 +131,8 @@
                       (close! in)
                       ; could/should add .sync; makes tests slower to exit
                       (-> loop-group .shutdownGracefully))
-             :port port :path ws-path :in in :out out :clients channel-group :evict evict})
+             :port port :path ws-path :in in :out out
+             :clients (wrap-channel-group channel-group) :evict evict})
           (catch Exception e
             (close! out)
             (close! in)
