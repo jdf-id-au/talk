@@ -70,6 +70,7 @@
 (s/def ::file (s/with-gen #(instance? java.io.File %)
                 #(gen/fmap (fn [^String p] (java.io.File. p))
                    (gen/string))))
+(s/def ::filename ::name)
 (s/def ::value (s/or ::data bytes? ::file ::file))
 (s/def ::content-type string?)
 (s/def ::transfer-encoding string?)
@@ -98,6 +99,7 @@
                                   ::uri ::path ::query ::parameters]))
 (defrecord Request [channel protocol meta method headers cookies uri path parameters]
   Object (toString [r] (str \< (-> method name str/upper-case) \  uri " on channel " (on r) \>)))
+
 ; file? explains whether value will be bytes or File
 ; keep charset as java.nio.Charset because convenient for decoding
 (s/def ::Attribute (s/keys :req-un [:talk.server/channel ::name ::charset ::file? ::value]))
@@ -105,16 +107,20 @@
   Object
   (toString [r]
     (str "<Attribute " \" name \"
-      (when-not file? (str \= \" (.decode charset (ByteBuffer/wrap value)) \"))
-      (when file? (str " written to disk at " (.getPath ^java.io.File value))) " from " (on r) \>)))
-; TODO support PUT and PATCH ->File
-(s/def ::File (s/keys :req-un [:talk.server/channel ::name ::charset ::content-type ::transfer-encoding ::file? ::value]))
-(defrecord File [channel name charset content-type transfer-encoding file? value]
+      (if file? (str " written to disk at " (.getPath ^java.io.File value))
+                (str \= \" (.decode charset (ByteBuffer/wrap value)) \"))
+      " from " (on r) \>)))
+
+(s/def ::File (s/keys :req-un [:talk.server/channel ::name ::filename ::charset ::content-type ::transfer-encoding ::file? ::value]))
+(defrecord File [channel name filename charset content-type transfer-encoding file? value]
   Object
   (toString [r]
-    (str "<File " \" name \" \space content-type
+    (str "<File " \" name \" (when-not (str/blank? filename) (str " (" filename ")")) \space
+      content-type
       (if file? (str " written to disk at " (.getPath ^java.io.File value))
-                (str " kept in memory because short" #_#_(count value) \B)) " from " (on r) \>)))
+                (str " kept in memory" #_#_(count value) \B))
+      " from " (on r) \>)))
+
 ; trailing headers ; NB if echoing file, should delay cleanup until fully sent
 (s/def ::Trail (s/keys :req-un [:talk.server/channel ::cleanup ::headers]))
 (defrecord Trail [channel cleanup headers]
@@ -311,7 +317,7 @@
                 (catch HttpPostRequestDecoder$EndOfDataDecoderException e
                   (if (.currentPartialHttpData decoder)
                     (log/debug "End of data exception in" (ess id) "at .hasNext with partial")
-                    (log/debug "Confusing end of data exception in" (ess id) decoder))))
+                    #_(log/debug "Confusing end of data exception in" (ess id) decoder))))
       (if-let [^InterfaceHttpData data
                (try (.next decoder)
                     (catch HttpPostRequestDecoder$EndOfDataDecoderException e
@@ -332,8 +338,7 @@
             (let [^FileUpload d data file? (-> d .isInMemory not)]
               (if (.isCompleted d)
                 (when-not (async/put! in
-                            (->File id
-                              (.getFilename d) (.getCharset d)
+                            (->File id (.getName d) (.getFilename d) (.getCharset d)
                               (.getContentType d) (.getContentTransferEncoding d)
                               file? (if file? (.getFile d) (.get d))))
                   (log/error "Dropped incoming POST file because in chan is closed"))
@@ -362,7 +367,7 @@
           (short-circuit out id HttpResponseStatus/EXPECTATION_FAILED))
       (short-circuit out id HttpResponseStatus/CONTINUE))))
 
-(defmethod ask-to! ::ws-upgrade ; FIXME only open ws door after http auth?
+(defmethod ask-to! ::ws-upgrade ; TODO only open ws door after http auth?
   ; Concept is "may the user on channel x (with channel-meta as noted)
   ; upgrade to websocket at path z?"
   [_ {:keys [ws-path out] :as opts} ^ChannelHandlerContext ctx ^HttpRequest req]

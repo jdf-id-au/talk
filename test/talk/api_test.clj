@@ -88,7 +88,8 @@
                             {:http-client http :throw-exceptions? false
                              :form-params {:bigfield1 long-text :bigfield2 binary}})))
         "Simple form request with two big fields is too big!")
-      ; FIXME not writing attrib to disk! Maybe need multipart to do that?
+      ; FIXME not writing attrib to disk!
+      ; Think need multipart to do that? Or misleading content-length?
       (is (= 200 (:status (hc/post (str "http://localhost:" port "/post-big-form-urlencoded")
                             {:http-client http :throw-exceptions? false
                              :form-params {:bigfield binary}})))
@@ -113,7 +114,17 @@
                             {:http-client http :throw-exceptions? false
                              :content-type :octet-stream
                              :body binary})))
-        "Simple post with binary works."))
+        "Simple post with binary works.")
+      (is (= 200 (:status (hc/put (str "http://localhost:" port "/put-binary")
+                            {:http-client http :throw-exceptions? false
+                             :content-type :octet-stream
+                             :body binary})))
+        "Put with binary works.")
+      (is (= 200 (:status (hc/patch (str "http://localhost:" port "/patch-binary")
+                            {:http-client http :throw-exceptions? false
+                             :content-type :octet-stream
+                             :body binary})))
+        "Patch with binary works."))
     (testing "ws"
       (is (= short-text (when (async/put! (ws :out) short-text) (read!!)))
         "Short text WS roundtrip works.")
