@@ -2,12 +2,15 @@
   (:require [clojure.tools.logging :as log]
             [clojure.pprint :refer [pprint]])
   (:import (io.netty.channel ChannelId ChannelHandlerContext Channel)
-           (io.netty.handler.codec.http HttpRequest HttpResponse DefaultHttpContent HttpContent DefaultFullHttpResponse LastHttpContent)
+           (io.netty.handler.codec.http HttpRequest HttpContent
+                                        DefaultFullHttpResponse LastHttpContent)
            (io.netty.util AttributeKey)
            (io.netty.channel.group ChannelGroup)
-           (clojure.lang IPersistentMap ILookup IPersistentCollection Counted Seqable Associative IObj MapEntry)
-           (io.netty.handler.codec.http.multipart MixedAttribute InterfaceHttpPostRequestDecoder HttpPostRequestDecoder$NotEnoughDataDecoderException HttpPostRequestDecoder$EndOfDataDecoderException MixedFileUpload HttpDataFactory FileUpload)
-           (java.nio.charset Charset)))
+           (clojure.lang IPersistentMap ILookup Counted Seqable Associative IObj MapEntry)
+           (io.netty.handler.codec.http.multipart
+             InterfaceHttpPostRequestDecoder
+             HttpPostRequestDecoder$NotEnoughDataDecoderException
+             HttpPostRequestDecoder$EndOfDataDecoderException FileUpload)))
 
 ; Copy-past from jdf/comfort to avoid dep
 
@@ -135,7 +138,9 @@
       (some-> (.find channel-group k) wrap-channel))
     (assoc [this k v]
       ; NB Only to allow assoc-in and update-in to work!
-      this)))
+      (if (.find channel-group k)
+        this
+        (unsupported "This is a wrapped io.netty.channel.group.ChannelGroup. Can't assoc new.")))))
     ;IObj
     ; (withMeta [_ _] (unsupported)))))
     ;IFn ; holy crap too many methods

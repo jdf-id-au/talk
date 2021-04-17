@@ -477,15 +477,6 @@
 
   HttpContent
   ; Started with https://github.com/netty/netty/blob/master/example/src/main/java/io/netty/example/http/upload/HttpUploadServerHandler.java
-
-  ; PUT and PATCH do work, but only if multipart/form-data (with ;boundary="blah" ?) it seems.
-  ; TODO try application/x-www-form-urlencoded ?
-  ; Not enough to have content-type and data stream (tries to parse as attribute).
-  ; This is probably ok; lots of benefit from HPRD's Mixed{Attribute,FileUpload} classes
-  ; (in-memory, switches to disk after disk-threshold).
-
-  ; FIXME work out exactly what HttpPostStandardRequestDecoder wants (non-multipart) wrt headers etc.
-
   (read! [this ctx {:keys [out in] :as opts}]
     (let [ch (.channel ctx)
           wch (wrap-channel ch)
