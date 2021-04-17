@@ -40,6 +40,7 @@
           data (byte-array (.readableBytes content))]
       (.getBytes content 0 data)
       (->Binary id data))))
+
 (defprotocol Frame
   (frame [this]))
 (extend-protocol Frame

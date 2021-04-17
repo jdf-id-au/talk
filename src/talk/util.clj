@@ -1,11 +1,13 @@
 (ns talk.util
-  "Edited highlights from jdf/comfort, to avoid dep."
-  (:require [clojure.tools.logging :as log])
+  (:require [clojure.tools.logging :as log]
+            [clojure.pprint :refer [pprint]])
   (:import (io.netty.channel ChannelId ChannelHandlerContext Channel)
-           (io.netty.handler.codec.http HttpRequest HttpResponse)
+           (io.netty.handler.codec.http HttpRequest HttpResponse DefaultHttpContent HttpContent DefaultFullHttpResponse)
            (io.netty.util AttributeKey)
            (io.netty.channel.group ChannelGroup)
            (clojure.lang IPersistentMap ILookup IPersistentCollection Counted Seqable Associative IObj MapEntry)))
+
+; Copy-past from jdf/comfort to avoid dep
 
 (defn retag
   "spec convenience"
@@ -17,6 +19,10 @@
                         (<= (count comment) clip) comment
                         :else (str (subs comment 0 clip) "...")))
   ([comment] (briefly 20 comment)))
+
+; "Essentials" string renderer implementations
+
+(defn spp [v] (with-out-str (pprint v)))
 
 (defn on
   "Annotate on channel"
@@ -33,13 +39,20 @@
   ChannelId
   (ess [this] (.asShortText this))
   HttpRequest
-  (ess [this] (str (.method this) \space (.uri this)))
-  HttpResponse
-  (ess [this] (str (.protocolVersion this) \space (.status this) \space (.headers this)))
+  (ess [this] (str (.protocolVersion this) \  (.method this) \  (.uri this) \newline
+                (spp (into {} (.headers this)))))
+  HttpContent
+  (ess [this])
+  DefaultFullHttpResponse
+  (ess [this] (str (-> this .protocolVersion .toString) \  (-> this .status .toString) \newline
+                (spp (into {} (.headers this)))
+                (.decoderResult this)))
   Object
   (ess [this] (.toString this))
   nil
   (ess [this] "nil?!"))
+
+; Wrappers for Channel and ChannelGroup to pretend to be clojure maps
 
 (defn attribute-key [kw]
   (AttributeKey/valueOf (name kw)))

@@ -27,11 +27,12 @@
                                                   DiskFileUpload DiskAttribute
                                                   HttpPostRequestDecoder$ErrorDataDecoderException
                                                   HttpPostRequestDecoder$EndOfDataDecoderException
-                                                  InterfaceHttpData$HttpDataType FileUpload)
+                                                  InterfaceHttpData$HttpDataType FileUpload HttpData)
            (java.io RandomAccessFile)
            (java.net InetSocketAddress)
            (java.nio.charset Charset)
-           (io.netty.channel.group ChannelGroup)))
+           (io.netty.channel.group ChannelGroup)
+           (java.nio ByteBuffer)))
 
 ; Spec and records
 
@@ -100,11 +101,19 @@
 ; keep charset as java.nio.Charset because convenient for decoding
 (s/def ::Attribute (s/keys :req-un [:talk.server/channel ::name ::charset ::file? ::value]))
 (defrecord Attribute [channel name charset file? value]
-  Object (toString [r] (str "<Attribute " name \  (when file? "written to disk") " from " (on r) \>)))
+  Object
+  (toString [r]
+    (str "<Attribute " \" name \"
+      (when-not file? (str \= \" (.decode charset (ByteBuffer/wrap value)) \"))
+      (when file? (str " written to disk at " (.getPath ^java.io.File value))) " from " (on r) \>)))
 ; TODO support PUT and PATCH ->File
 (s/def ::File (s/keys :req-un [:talk.server/channel ::name ::charset ::content-type ::transfer-encoding ::file? ::value]))
 (defrecord File [channel name charset content-type transfer-encoding file? value]
-  Object (toString [r] (str "<File " name \  (when file? "written to disk") " from " (on r) \>)))
+  Object
+  (toString [r]
+    (str "<File " \" name \"
+      (if file? (str "written to disk at " (.getPath ^java.io.File value))
+                "kept in memory because small") " from " (on r) \>)))
 ; trailing headers ; NB if echoing file, should delay cleanup until fully sent
 (s/def ::Trail (s/keys :req-un [:talk.server/channel ::cleanup ::headers]))
 (defrecord Trail [channel cleanup headers]
@@ -151,7 +160,7 @@
   "Send HTTP response, and manage keep-alive and content-length.
    Fires channel read (provides backpressure) on success if keep-alive."
   [^ChannelHandlerContext ctx keep-alive? ^FullHttpResponse res]
-  (log/debug "Responding in" (ess ctx) "with" (ess res) (when keep-alive? "and keep-alive"))
+  (log/debug "Responding in" (ess ctx) (when keep-alive? "(keep-alive)") "with" (ess res))
   (let [status (.status res)
         ; TODO do any other codes merit keep-alive?
         ok-or-continue? (contains? #{HttpResponseStatus/OK HttpResponseStatus/CONTINUE} status)
@@ -226,8 +235,10 @@
             (do (log/error "Sent no http response on" (ess ch) "because of out chan timeout")
                 (emergency! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))
             nil
-            (do (log/warn "Sent no http response on" (ess ch) "because out chan closed")
-                (emergency! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))
+            (if (.isOpen ch)
+              (do (log/warn "Sent no http response on" (ess ch) "because out chan closed")
+                  (emergency! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))
+              (log/debug "Out chan closed and so is" (ess ch) ". Why am I worrying?"))
             (do
               #_(log/debug "Trying to send" (ess res))
               (case status 102 (.read ctx)
@@ -299,7 +310,7 @@
         ^HttpPostRequestDecoder decoder (:decoder wch)]
     (try
       (while (.hasNext decoder)
-        (log/debug "decoder has next")
+        #_(log/debug "decoder has next")
         (when-let [^InterfaceHttpData data (.next decoder)]
           (when (= data (:partial wch)) (dissoc wch :partial))
           (condp = (.getHttpDataType data)
@@ -323,12 +334,13 @@
                 (log/info "Dropped incoming POST file because upload incomplete")))
             (log/info "Dropped incoming POST data because unrecognised type"))))
       (when-let [^InterfaceHttpData data (.currentPartialHttpData decoder)]
-        (log/debug "partial decoding")
+        #_(log/debug "partial decoding" data)
         (.read ctx)
         (when-not (:partial wch) (assoc wch :partial data)))
           ; TODO could do finer-grained logging/events etc
       (catch HttpPostRequestDecoder$EndOfDataDecoderException e
-        (log/info (type e) (some->> e .getMessage (briefly 120)))))))
+        ; Is this just droppable?
+        #_(log/info (type e) (:partial wch))))))
 
 (defmulti ask-to!
   "Allows unacceptable requests to be stopped in flight, e.g. to prevent abusive POST.
@@ -381,11 +393,11 @@
              :charset (HttpUtil/getCharset req)
              :content-type (HttpUtil/getMimeType req)}
            method headers cookies (.uri req) (.path qsd) (.parameters qsd)))
+        ; Application can send 102 (to out chan, intercepted, not through to client)
+        ; if happy to receive post/put/patch.
+        ; This allows (.read ctx) in `responder` vs sending status code.
+        ; Poor client support for latter! https://stackoverflow.com/questions/18367824
         (do
-          ; TODO Application can send 102 (to out chan, intercepted, not through to client)
-          ; if happy to receive post/put/patch.
-          ; This allows (.read ctx) in `responder` vs sending status code.
-          ; Poor client support for latter! https://stackoverflow.com/questions/18367824
           (log/error "Dropped incoming http request because in chan is closed")
           (short-circuit out id HttpResponseStatus/SERVICE_UNAVAILABLE)))))
 
@@ -451,7 +463,7 @@
   HttpContent
   ; Started with https://github.com/netty/netty/blob/master/example/src/main/java/io/netty/example/http/upload/HttpUploadServerHandler.java
 
-  ; PUT and PATCH do work, but only if multipart/form-data (with ;boundary="blah") it seems.
+  ; PUT and PATCH do work, but only if multipart/form-data (with ;boundary="blah" ?) it seems.
   ; TODO try application/x-www-form-urlencoded ?
   ; Not enough to have content-type and data stream (tries to parse as attribute).
   ; This is probably ok; lots of benefit from HPRD's Mixed{Attribute,FileUpload} classes
@@ -465,12 +477,14 @@
           id (.id ch)
           decoder (:decoder wch)
           cleanup (fn [] (.destroy decoder) (dissoc wch :decoder))]
-      (if decoder
+      (when decoder
+        #_(log/debug "offering" this)
         (try (.offer decoder this)
              ; TODO could tally size of actual HttpContents and drop if abusive?
              ; (vs "stated" content length)
              (read-chunkwise! opts ctx)
              (when (instance? LastHttpContent this)
+               #_(log/debug "last" (.toString (.content this) (Charset/defaultCharset)))
                (or (async/put! in
                      (->Trail id cleanup
                        (-> ^LastHttpContent this .trailingHeaders parse-headers :headers)))
@@ -483,9 +497,10 @@
                (log/warn "Error running POST decoder" (some->> e .getMessage (briefly 120)))
                (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY))
              (catch IllegalStateException e
-               (log/debug "Tried to write to destroyed decoder" e)))
+               (log/debug "Tried to write to destroyed decoder" e))))
+      (if-not decoder
         ; Ignore EmptyLastHttpContent following requests with methods which we don't allow to have body.
-        #_(log/debug "Dropped" this "because no decoder. Does method support body?")))))
+        (log/debug "Dropped" this "because no decoder. Does method support body?")))))
 
 (defn ^ChannelHandler handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
@@ -499,7 +514,7 @@
     (set! (. DiskAttribute baseDirectory) nil)
     (proxy [SimpleChannelInboundHandler] [HttpObject]
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
-        (log/debug "Received" (ess obj))
+        (some->> obj ess (log/debug "Received"))
         (when (read! obj ctx opts)
           (responder opts ctx))
         #_(log/debug "End of http/handler."))

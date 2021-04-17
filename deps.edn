@@ -19,5 +19,6 @@
                      org.slf4j/slf4j-simple {:mvn/version "1.7.30"}
                      com.taoensso/timbre {:mvn/version "5.1.2"}
                      com.fzakaria/slf4j-timbre {:mvn/version "0.3.21"}
-                     bidi/bidi {:mvn/version "2.1.6"}}
+                     bidi/bidi {:mvn/version "2.1.6"}
+                     cheshire/cheshire {:mvn/version "5.10.0"}}
         :extra-paths ["dev" "test"]}}}

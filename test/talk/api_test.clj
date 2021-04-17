@@ -38,9 +38,9 @@
   Request (echo [this]
             {:status 200 :headers {:content-encoding "text/plain"}
              :content (str this) :channel (:channel this)})
-  Attribute (echo [_])
-  File (echo [_])
-  Trail (echo [_])
+  Attribute (echo [this] (log/debug "Received" (str this)))
+  File (echo [this] (log/debug "Received" this))
+  Trail (echo [this] #_(log/debug "Received" this))
   Text (echo [this] (log/debug "Echoing text") this)
   Binary (echo [this] (log/debug "Echoing binary") this))
 
@@ -78,7 +78,28 @@
       (is (= 200 (:status (hc/get (str "http://localhost:" port "/") {:http-client http})))
         "HTTP GET returns status 200.")
       (is (= 200 (:status (hc/get (str "http://localhost:" port "/hello") {:http-client http})))
-         "Second request from same client works (should be reusing channel but this isn't tested)."))
+        "Second request from same client works (should be reusing channel but this isn't tested).")
+      (is (= 200 (:status (hc/post (str "http://localhost:" port "/post-form-urlencoded")
+                            {:http-client http :throw-exceptions? false
+                             :form-params {:field1 "val1" :field2 "val2"}})))
+        "Simple form request works."))
+    (testing "angry http"  ; FIXME not deterministic, sometimes need to introduce tests individually?
+      (is (= 200 (:status (hc/post (str "http://localhost:" port "/post-big-form-urlencoded")
+                            {:http-client http :throw-exceptions? false
+                             :form-params {:bigfield1 "not big yet" :bigfield2 binary}})))
+        "Simple form request with bigger field works.")
+      (is (= 200 (:status (hc/post (str "http://localhost:" port "/post-multipart")
+                            {:http-client http :throw-exceptions? false
+                             :multipart [{:name "multipart1" :content "boring text"}
+                                         {:name "multipart2" :content binary
+                                          :content-type :octet-stream}]})))
+        "Multipart form incl binary attribute works.")
+      ; TODO manually coalesce non-urlencoded-non-multipart bodies?
+      (is (= 200 (:status (hc/post (str "http://localhost:" port "/post-json")
+                             {:http-client http :throw-exceptions? false
+                              :content-type :json
+                              :form-params {:json1 12345 :json2 ["ugh" "blah"]}})))))
+    ; FIXME few errant SUBSEQUENT 503s from closed out chan
     (testing "ws"
       (is (= short-text (when (async/put! (ws :out) short-text) (read!!)))
         "Short text WS roundtrip works.")
