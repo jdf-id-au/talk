@@ -44,10 +44,6 @@
   Text (echo [this] (log/debug "Echoing text") this)
   Binary (echo [this] (log/debug "Echoing binary") this))
 
-; TODO test
-; - small & large file put/post/patch multipart form data (and urlencoded?)
-; - successive such requests on kept-alive channel
-
 (defn echo-application [{:keys [in out] :as server}]
   (go-loop [msg (<! in)]
     (if-let [res (some-> msg echo)]
@@ -89,7 +85,7 @@
                             {:http-client http :throw-exceptions? false
                              :form-params {:bigfield1 long-text :bigfield2 binary}})))
         "Simple form request with two big fields is too big!")
-      ; FIXME not writing attrib to disk! Needs multipart to do that?
+      ; FIXME not writing attrib to disk! Maybe need multipart to do that?
       (is (= 200 (:status (hc/post (str "http://localhost:" port "/post-big-form-urlencoded")
                             {:http-client http :throw-exceptions? false
                              :form-params {:bigfield binary}})))
@@ -100,7 +96,6 @@
                                          {:name "multipart2" :content binary
                                           :content-type :octet-stream}]})))
         "Multipart form incl binary attribute works.")
-      ; TODO manually coalesce non-urlencoded-non-multipart bodies?
       (is (= 200 (:status (hc/post (str "http://localhost:" port "/post-json")
                              {:http-client http :throw-exceptions? false
                               :content-type :json
@@ -111,7 +106,6 @@
                              :content-type :transit+json
                              :form-params {:transit1 12345 :transit2 ["ugh" "blah"]}})))
         "Simple post with json works."))
-    ; FIXME few errant SUBSEQUENT 503s from closed out chan
     (testing "ws"
       (is (= short-text (when (async/put! (ws :out) short-text) (read!!)))
         "Short text WS roundtrip works.")

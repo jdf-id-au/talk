@@ -7,7 +7,7 @@
             [clojure.string :as str]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
-            [talk.util :refer [on briefly ess wrap-channel fake-decoder]])
+            [talk.util :refer [briefly spp on ess wrap-channel fake-decoder]])
   (:import (io.netty.buffer Unpooled ByteBuf)
            (io.netty.channel ChannelHandler SimpleChannelInboundHandler
                              ChannelHandlerContext ChannelFutureListener
@@ -427,19 +427,18 @@
           protocol (.protocolVersion this)
           headers (.headers this)
           content-type (some-> this HttpUtil/getMimeType str/lower-case)
+          charset (HttpUtil/getCharset this CharsetUtil/UTF_8)
           keep-alive? (HttpUtil/isKeepAlive this)
           method (-> this .method .toString str/lower-case keyword)
           decoder (case method
                     (:put :post :patch)
                     (case content-type
-                      ("application/x-form-www-urlencoded" "multipart/form-data")
+                      ("application/x-www-form-urlencoded" "multipart/form-data")
                       (try (HttpPostRequestDecoder. data-factory this)
                            (catch HttpPostRequestDecoder$ErrorDataDecoderException e
                              (log/warn "Error setting up POST decoder" e)
                              (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)))
-                      ; Aim to return a single attribute named after content type
-                      ; TODO pick up encoding?
-                      (fake-decoder content-type max-content-length))
+                      (fake-decoder content-type max-content-length charset))
                     ; Not accepting body for other methods
                     nil)]
       (assoc wch :decoder decoder

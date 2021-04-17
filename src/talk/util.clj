@@ -6,7 +6,8 @@
            (io.netty.util AttributeKey)
            (io.netty.channel.group ChannelGroup)
            (clojure.lang IPersistentMap ILookup IPersistentCollection Counted Seqable Associative IObj MapEntry)
-           (io.netty.handler.codec.http.multipart MixedAttribute InterfaceHttpPostRequestDecoder HttpPostRequestDecoder$NotEnoughDataDecoderException HttpPostRequestDecoder$EndOfDataDecoderException)))
+           (io.netty.handler.codec.http.multipart MixedAttribute InterfaceHttpPostRequestDecoder HttpPostRequestDecoder$NotEnoughDataDecoderException HttpPostRequestDecoder$EndOfDataDecoderException)
+           (java.nio.charset Charset)))
 
 ; Copy-past from jdf/comfort to avoid dep
 
@@ -142,9 +143,10 @@
 ; Allow simple uploads
 
 (defn fake-decoder
-  "All I want is to be able to receive chunked plain POST/PUT/PATCH bodies!"
-  [name limitSize]
-  (let [ma (MixedAttribute. name limitSize)
+  "All I want is to be able to receive chunked plain POST/PUT/PATCH bodies!
+   Return a single Attribute named after content type."
+  [^String name ^long limitSize ^Charset charset]
+  (let [ma (MixedAttribute. name limitSize charset)
         delivered? (atom false)]
     (reify InterfaceHttpPostRequestDecoder
       (isMultipart [_] false)
@@ -164,10 +166,10 @@
         ; TODO Double check this handles refcounts properly
         (.addContent ma (.content con) (instance? LastHttpContent con)))
       (hasNext [_]
-        (and (not delivered?) (.isCompleted ma)))
+        (and (not @delivered?) (.isCompleted ma)))
       (next [_]
         (if (.isCompleted ma)
-          (if delivered?
+          (if @delivered?
             (throw (HttpPostRequestDecoder$EndOfDataDecoderException.))
             (and (reset! delivered? true) ma))))
       (currentPartialHttpData [_]
