@@ -5,6 +5,8 @@
             [clojure.pprint :refer [pprint]])
   (:import (java.util TimeZone)))
 
+; Logging config
+
 (defn pprint-middleware
   "Middleware after https://github.com/ptaoussanis/timbre/issues/184#issuecomment-397421329"
   [data]
@@ -25,22 +27,26 @@
 (configure :debug)
 (add-tap pprint)
 
-#_(do
-    (require '[talk.api :as talk]) ; delay netty noise until after logger configured
-    (import ; bad for reloadability
-      (talk.server Connection)
-      (talk.http Request Attribute File Trail)
-      (talk.ws Text Binary)))
-    ; not working?
-    ;(defmethod clojure.pprint/simple-dispatch Connection [_] prn)
-    ;(defmethod clojure.pprint/simple-dispatch Request [_] prn)
-    ;(defmethod clojure.pprint/simple-dispatch Attribute [_] prn)
-    ;(defmethod clojure.pprint/simple-dispatch File [_] prn)
-    ;(defmethod clojure.pprint/simple-dispatch Text [_] prn)
-    ;(defmethod clojure.pprint/simple-dispatch Binary [_] prn))
+; REPL interactive demo
 
-; Can test file upload POST and PUT with (respectively, after setting up echo server):
-; Will only be :file? if over threshold (default 16KB)
-; FIXME does seem fairly slow for huge files (adjust chunk size?)
-; % curl http://localhost:8125/path -v --form "fileupload=@file.pdf;filename=hmm.pdf"
-; $ curl http://localhost:8125/path -v -T file.pdf
+#_ (def server (talk/server! 8080
+                 {:ws-path "/ws"
+                  :handler-timeout (* 10 1000)}))
+
+; Use ws client to connect and send message
+#_ (<!! (:in server)) ; should be http connection
+#_ (<!! (:in server)) ; should be ws upgrade
+#_ (<!! (:in server)) ; should be message you sent
+#_ (>!! (:out server)  (->Text (:channel *1) "hello there"))
+; Should appear in ws client
+
+; Use http client to connect
+#_ (<!! (:in server)) ; should be http connection
+#_ (<!! (:in server)) ; should be http request
+; Do this within timeout period!
+#_ (>!! (:out server) {:channel (:channel *1)
+                       :status 200
+                       :headers {:content-type "text/plain"}
+                       :content "hello"})
+
+#_ ((:close server))

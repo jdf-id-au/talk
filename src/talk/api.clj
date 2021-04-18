@@ -35,7 +35,7 @@
 (s/def ::ws-path (s/and string? #(re-matches #"/.*" %))) ; TODO refine
 (s/def ::in-buffer pos-int?)
 (s/def ::out-buffer pos-int?)
-(s/def ::timeout (s/int-in 10 10000))
+(s/def ::timeout (s/int-in 10 10001))
 (s/def ::handler-timeout ::timeout)
 (s/def ::disk-threshold (s/int-in 1024 (* 1024 1024)))
 (s/def ::handshake-timeout ::timeout)
