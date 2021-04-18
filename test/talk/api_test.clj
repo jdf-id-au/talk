@@ -38,7 +38,7 @@
   Request (echo [{:keys [channel method] :as this}]
             (case method
               (:post :put :patch)
-              {:status 102 :channel channel}
+              {:status 102 :channel channel} ; i.e. approve upload
               {:status 200 :headers {:content-type "text/plain; charset=utf-8"}
                :content (str this) :channel channel}))
   Attribute (echo [this] (log/debug "Received" (str this)))
@@ -61,7 +61,8 @@
         {:keys [http ws]} @test-clients ; opening ws client should actually connect to server
         [ws-id ws-ch] (first clients)
         _ (echo-application server)
-        ;read!! #(alt!! (ws :in) ([v] v) (async/timeout 100) nil) ; hangs whole IDE when trying to view error report?!
+        ; hangs whole IDE when trying to view error report?!
+        #_#_read!! #(alt!! (ws :in) ([v] v) (async/timeout 100) nil)
         read!! #(<!! (ws :in)) ; just hangs REPL mid-test (still closable)
         short-text "hello"
         ; FIXME
@@ -125,6 +126,7 @@
                              :content-type :octet-stream
                              :body binary})))
         "Patch with binary works."))
+      ; TODO test CORS
     (testing "ws"
       (is (= short-text (when (async/put! (ws :out) short-text) (read!!)))
         "Short text WS roundtrip works.")

@@ -74,6 +74,7 @@
           #_(.addLast "http-compr" (HttpContentCompressor.))
           #_(.addLast "http-decompr" (HttpContentDecompressor.))
           (.addLast "streamer" (ChunkedWriteHandler.))
+          ; Safari doesn't seem to attempt CORS even when on different port; ff & chrome ok
           (.addLast "cors" (CorsHandler. (.build ccb)))
           (.addLast "http-handler" (http/handler opts)))
         (when ws-path

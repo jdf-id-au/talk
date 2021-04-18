@@ -246,7 +246,9 @@
               (do (log/warn "Sent no http response on" (ess ch) "because out chan closed")
                   (emergency! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))
               (log/debug "Out chan closed and so is" (ess ch) ". Why am I worrying?"))
-            (case (.code status) 102 (.read ctx)
+            (case (.code status)
+              ; TODO should probably warn programmer if POST/PUT/PATCH without 102
+              102 (.read ctx)
               (if (instance? java.io.File content)
                 ; TODO add support for other streaming sources (use protocols?)
                 ; Streaming:
@@ -419,7 +421,8 @@
 ;          -> HttpRequest
 
 (defprotocol ReadableHttpObject
-  (read! [this ctx opts] "Read channel and indicate whether to call responder."))
+  (read! [this ctx opts]
+    "Read channel and indicate whether to call responder. Don't forget return value!"))
 
 (extend-protocol ReadableHttpObject
   FullHttpRequest
@@ -501,8 +504,10 @@
                (log/warn "Error running POST decoder" (some->> e .getMessage (briefly 120)))
                (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY))
              (catch IllegalStateException e
-               (log/debug "Tried to write to destroyed decoder" e)))
+               (log/error "Tried to write to destroyed decoder" e)
+               (short-circuit out id HttpResponseStatus/SERVICE_UNAVAILABLE)))
         ; Ignore EmptyLastHttpContent following requests with methods which we don't allow to have body.
+        (do (.read ctx) false) ; needed for CORS which given orphan EmptyLastHttpContent from OPTIONS Requset I think
         #_(log/debug "Dropped" this "because no decoder. Does method support body?")))))
 
 (defn ^ChannelHandler handler
@@ -518,11 +523,12 @@
     (proxy [SimpleChannelInboundHandler] [HttpObject]
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
         (some->> obj ess (log/debug "Received on" (ess ctx)))
-        (let [drc (-> obj .decoderResult .cause)
+        (let [decoder-error (-> obj .decoderResult .cause)
               id (-> ctx .channel .id)
-              respond? (or drc (read! obj ctx opts))]
-          (when drc (do (log/warn "Decoder failed" drc)
-                        (short-circuit out id HttpResponseStatus/BAD_REQUEST)))
+              respond? (or decoder-error (read! obj ctx opts))]
+          (when decoder-error
+            (log/warn "Decoder failed" decoder-error) ; e.g. TLS (need reverse proxy to handle)
+            (short-circuit out id HttpResponseStatus/BAD_REQUEST))
           (when respond? (responder opts ctx)))
         #_(log/debug "End of http/handler."))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
