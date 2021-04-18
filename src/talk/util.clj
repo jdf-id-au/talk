@@ -3,8 +3,8 @@
             [clojure.pprint :refer [pprint]])
   (:import (io.netty.channel ChannelId ChannelHandlerContext Channel)
            (io.netty.handler.codec.http HttpRequest HttpContent
-                                        DefaultFullHttpResponse LastHttpContent)
-           (io.netty.util AttributeKey)
+                                        DefaultFullHttpResponse LastHttpContent HttpUtil)
+           (io.netty.util AttributeKey CharsetUtil)
            (io.netty.channel.group ChannelGroup)
            (clojure.lang IPersistentMap ILookup Counted Seqable Associative IObj MapEntry)
            (io.netty.handler.codec.http.multipart
@@ -150,37 +150,45 @@
 (defn fake-decoder
   "All I want is to be able to receive chunked plain POST/PUT/PATCH bodies!
    Return a single FileUpload. Use content-type: application/octet-stream for binary."
-  [^FileUpload fu]
-  (let [delivered? (atom false)]
-    (reify InterfaceHttpPostRequestDecoder
-      (isMultipart [_] false)
-      (setDiscardThreshold [_ _] (unsupported))
-      (getDiscardThreshold [_] (unsupported))
-      (getBodyHttpDatas [_]
-        (if (.isCompleted fu)
-          [fu]
-          (throw (HttpPostRequestDecoder$NotEnoughDataDecoderException.
-                   (str "Need more chunks " name)))))
-      ; Only proposing to collect one.
-      (getBodyHttpDatas [this _]
-        (.getBodyHttpDatas this))
-      (getBodyHttpData [this _]
-        (.getBodyHttpDatas this))
-      (offer [_ con]
-        ; TODO double check HPRD impls
-        (.addContent fu (.content (.retain con)) (instance? LastHttpContent con)))
-      (hasNext [_]
-        (and (not @delivered?) (.isCompleted fu)))
-      (next [_]
-        (if (.isCompleted fu)
-          (if @delivered?
-            (throw (HttpPostRequestDecoder$EndOfDataDecoderException.))
-            (and (reset! delivered? true) fu))))
-      (currentPartialHttpData [_]
-        fu)
-      (destroy [_]
-        (.delete fu)
-        (.release fu)
-        nil)
-      (cleanFiles [_] (unsupported))
-      (removeHttpDataFromClean [_ _] (unsupported)))))
+  [data-factory ^HttpRequest req]
+  (let [content-type (HttpUtil/getMimeType req)
+        charset (HttpUtil/getCharset req CharsetUtil/UTF_8)
+        content-length (try (HttpUtil/getContentLength req) (catch NumberFormatException _))]
+    (cond (not content-type) (throw (IllegalArgumentException. "No content-type"))
+          (not content-length) (throw (IllegalArgumentException. "No content-length"))
+      :else
+      (let [^FileUpload fu (.createFileUpload data-factory req "payload" ""
+                             content-type nil charset content-length)
+            delivered? (atom false)]
+        (reify InterfaceHttpPostRequestDecoder
+          (isMultipart [_] false)
+          (setDiscardThreshold [_ _] (unsupported))
+          (getDiscardThreshold [_] (unsupported))
+          (getBodyHttpDatas [_]
+            (if (.isCompleted fu)
+              [fu]
+              (throw (HttpPostRequestDecoder$NotEnoughDataDecoderException.
+                       (str "Need more chunks " name)))))
+          ; Only proposing to collect one.
+          (getBodyHttpDatas [this _]
+            (.getBodyHttpDatas this))
+          (getBodyHttpData [this _]
+            (.getBodyHttpDatas this))
+          (offer [_ con]
+            ; TODO double check HPRD impls
+            (.addContent fu (.content (.retain con)) (instance? LastHttpContent con)))
+          (hasNext [_]
+            (and (not @delivered?) (.isCompleted fu)))
+          (next [_]
+            (if (.isCompleted fu)
+              (if @delivered?
+                (throw (HttpPostRequestDecoder$EndOfDataDecoderException.))
+                (and (reset! delivered? true) fu))))
+          (currentPartialHttpData [_]
+            fu)
+          (destroy [_]
+            (.delete fu)
+            (.release fu)
+            nil)
+          (cleanFiles [_] (unsupported))
+          (removeHttpDataFromClean [_ _] (unsupported)))))))

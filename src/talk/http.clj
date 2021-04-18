@@ -425,7 +425,7 @@
   FullHttpRequest
   (read! [this ctx opts]
     (log/error "This library needs unaggregated HttpRequests."
-      "Please remove HttpObjectAggregator from pipeline." this))
+      "Please remove HttpObjectAggregator from pipeline." (ess this)))
 
   HttpRequest
   (read! [this ctx {:keys [data-factory out max-content-length] :as opts}]
@@ -435,31 +435,29 @@
           protocol (.protocolVersion this)
           headers (.headers this)
           content-type (some-> this HttpUtil/getMimeType str/lower-case)
-          content-length (try (HttpUtil/getContentLength this)
-                              (catch NumberFormatException _))
-          charset (HttpUtil/getCharset this CharsetUtil/UTF_8)
+          content-length (try (HttpUtil/getContentLength this) (catch NumberFormatException _))
           keep-alive? (HttpUtil/isKeepAlive this)
           method (-> this .method .toString str/lower-case keyword)
-          decoder (case method
-                    (:put :post :patch)
-                    (case content-type
-                      ("application/x-www-form-urlencoded" "multipart/form-data")
-                      (try (HttpPostRequestDecoder. data-factory this)
-                           (catch HttpPostRequestDecoder$ErrorDataDecoderException e
-                             (log/warn "Error setting up POST decoder" e)
-                             (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)))
-                      (fake-decoder (.createFileUpload data-factory this "payload" ""
-                                      content-type nil charset content-length)))
-                    ; Not accepting body for other methods
-                    nil)]
+          decoder
+          (case method
+            (:put :post :patch)
+            (case content-type
+              ("application/x-www-form-urlencoded" "multipart/form-data")
+              (try (HttpPostRequestDecoder. data-factory this)
+                   (catch HttpPostRequestDecoder$ErrorDataDecoderException e
+                     (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)
+                     ; put log second so return value is nil
+                     (log/warn "Error setting up POST decoder" e)))
+              (try (fake-decoder data-factory this)
+                   (catch Exception e
+                     (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)
+                     (log/warn "Error setting up decoder" e))))
+            ; Not accepting body for other methods
+            nil)]
       (assoc wch :decoder decoder
                  :protocol protocol
                  :keep-alive? keep-alive?)
       (cond
-        (-> this .decoderResult .isSuccess not)
-        (do (log/warn (-> this .decoderResult .cause .getMessage))
-            (short-circuit out id HttpResponseStatus/BAD_REQUEST))
-
         ; https://stackoverflow.com/questions/12586881 Long weirdness
         ; FIXME vulnerable to reported < actual content length
         (some-> content-length (> (:max-content-length wch max-content-length)))
@@ -510,7 +508,7 @@
 (defn ^ChannelHandler handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
   ; TODO read about HTTP/2 https://developers.google.com/web/fundamentals/performance/http2
-  [{:keys [disk-threshold] :as opts}]
+  [{:keys [disk-threshold out] :as opts}]
   #_(log/debug "Starting http handler")
   (let [opts (assoc opts :data-factory (DefaultHttpDataFactory. ^long disk-threshold))]
     (set! (. DiskFileUpload deleteOnExitTemporaryFile) true) ; same as default
@@ -520,8 +518,11 @@
     (proxy [SimpleChannelInboundHandler] [HttpObject]
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
         (some->> obj ess (log/debug "Received on" (ess ctx)))
-        (when (read! obj ctx opts)
-          (responder opts ctx))
+        (if-let [drc (-> obj .decoderResult .cause)]
+          (do (log/warn "Decoder failed" drc)
+              (short-circuit out (-> ctx .channel .id) HttpResponseStatus/BAD_REQUEST))
+          (when (read! obj ctx opts)
+            (responder opts ctx)))
         #_(log/debug "End of http/handler."))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
         (let [ch (.channel ctx)
