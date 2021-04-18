@@ -83,7 +83,7 @@
                             {:http-client http :throw-exceptions? false
                              :form-params {:field1 "val1" :field2 "val2"}})))
         "Simple form request works."))
-    (testing "angry http" ; FIXME keep eye out for ResourceLeakDetector reports
+    (testing "angry http"
       (is (= 413 (:status (hc/post (str "http://localhost:" port "/post-massive-form-urlencoded")
                             {:http-client http :throw-exceptions? false
                              :form-params {:bigfield1 long-text :bigfield2 binary}})))

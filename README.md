@@ -34,7 +34,7 @@ Streams uploads to disk above threshold size.
 ; Message appears in ws client
 
 ; Use browser to visit http://localhost:8080/hello
-; It will time out because no reply
+; It will time out unless you're quick with the next steps!
 
 (<!! (:in server))
 ;=> talk.http.Connection record representing http connection
@@ -46,7 +46,7 @@ Streams uploads to disk above threshold size.
 (>!! (:out server)
   {:channel (:channel *1)
    :status 200
-   :headers {:content-type "text/html"}
+   :headers {:content-type "text/plain"}
    :content "hello"
   })
 
