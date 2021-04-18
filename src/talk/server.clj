@@ -58,7 +58,8 @@
            ^int max-chunk-size ^int max-content-length] :as opts}]
   (log/debug "Starting pipeline")
   (let [^CorsConfigBuilder ccb
-        (if allow-origin (CorsConfigBuilder/forOrigin allow-origin)
+        (if allow-origin (doto (CorsConfigBuilder/forOrigin allow-origin)
+                               (.allowedRequestHeaders (into-array ["content-type"])))
                          (.disable (CorsConfigBuilder/forAnyOrigin)))]
     (proxy [ChannelInitializer] []
       (initChannel [^SocketChannel ch]
