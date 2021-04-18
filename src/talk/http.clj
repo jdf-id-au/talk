@@ -518,11 +518,12 @@
     (proxy [SimpleChannelInboundHandler] [HttpObject]
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
         (some->> obj ess (log/debug "Received on" (ess ctx)))
-        (if-let [drc (-> obj .decoderResult .cause)]
-          (do (log/warn "Decoder failed" drc)
-              (short-circuit out (-> ctx .channel .id) HttpResponseStatus/BAD_REQUEST))
-          (when (read! obj ctx opts)
-            (responder opts ctx)))
+        (let [drc (-> obj .decoderResult .cause)
+              id (-> ctx .channel .id)
+              respond? (or drc (read! obj ctx opts))]
+          (when drc (do (log/warn "Decoder failed" drc)
+                        (short-circuit out id HttpResponseStatus/BAD_REQUEST)))
+          (when respond? (responder opts ctx)))
         #_(log/debug "End of http/handler."))
       (exceptionCaught [^ChannelHandlerContext ctx ^Throwable cause]
         (let [ch (.channel ctx)

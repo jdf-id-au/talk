@@ -19,7 +19,8 @@
                                                    WebSocketFrameAggregator)
            (io.netty.util ReferenceCountUtil)
            (talk.http Connection Request Attribute File Trail)
-           (talk.ws Text Binary)))
+           (talk.ws Text Binary)
+           (io.netty.handler.codec.http.cors CorsHandler CorsConfig CorsConfigBuilder$ConstantValueGenerator CorsConfigBuilder)))
 
 (s/def ::channel (s/with-gen #(instance? ChannelId %)
                    #(gen/fmap (fn [_] (DefaultChannelId/newInstance)) (s/gen nil?))))
@@ -50,36 +51,41 @@
       (.fireChannelRead ctx obj))))
 
 (defn pipeline
-  [^String ws-path
-   {:keys [^int handshake-timeout
+  [{:keys [^String ws-path
+           ^String allow-origin
+           ^int handshake-timeout
            ^int max-frame-size ^int max-message-size
            ^int max-chunk-size ^int max-content-length] :as opts}]
   (log/debug "Starting pipeline")
-  (proxy [ChannelInitializer] []
-    (initChannel [^SocketChannel ch]
-      (doto (.pipeline ch)
-        ; TODO could add handlers selectively according to need (from within the channel)
-        (.addLast "http" (HttpServerCodec.
-                           HttpObjectDecoder/DEFAULT_MAX_INITIAL_LINE_LENGTH
-                           HttpObjectDecoder/DEFAULT_MAX_HEADER_SIZE
-                           max-chunk-size))
-        (.addLast "tracker" (tracker opts))
-        ; less network but more memory
-        #_(.addLast "http-compr" (HttpContentCompressor.))
-        #_(.addLast "http-decompr" (HttpContentDecompressor.))
-        (.addLast "streamer" (ChunkedWriteHandler.))
-        (.addLast "http-handler" (http/handler opts)))
-      (when ws-path
+  (let [^CorsConfigBuilder ccb
+        (if allow-origin (CorsConfigBuilder/forOrigin allow-origin)
+                         (.disable (CorsConfigBuilder/forAnyOrigin)))]
+    (proxy [ChannelInitializer] []
+      (initChannel [^SocketChannel ch]
         (doto (.pipeline ch)
-          ; Needed for WebSocketServerProtocolHandler but not wanted for http/handler
-          ; (so HttpPostRequestDecoder streams properly)
-          ; so need to pass through ws upgrade requests...
-          (.addLast "http-agg" (HttpObjectAggregator. max-content-length))
-          #_(.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions
-          (.addLast "ws" (WebSocketServerProtocolHandler.
-                           ; TODO [application] could specify subprotocol?
-                           ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
-                           ws-path nil true max-frame-size handshake-timeout))
-          ; TODO replace with functionality in main handler (e.g. via disk if big)
-          (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
-          (.addLast "ws-handler" (ws/handler opts)))))))
+          ; TODO could add handlers selectively according to need (from within the channel)
+          (.addLast "http" (HttpServerCodec.
+                             HttpObjectDecoder/DEFAULT_MAX_INITIAL_LINE_LENGTH
+                             HttpObjectDecoder/DEFAULT_MAX_HEADER_SIZE
+                             max-chunk-size))
+          (.addLast "tracker" (tracker opts))
+          ; less network but more memory
+          #_(.addLast "http-compr" (HttpContentCompressor.))
+          #_(.addLast "http-decompr" (HttpContentDecompressor.))
+          (.addLast "streamer" (ChunkedWriteHandler.))
+          (.addLast "cors" (CorsHandler. (.build ccb)))
+          (.addLast "http-handler" (http/handler opts)))
+        (when ws-path
+          (doto (.pipeline ch)
+            ; Needed for WebSocketServerProtocolHandler but not wanted for http/handler
+            ; (so HttpPostRequestDecoder streams properly)
+            ; so need to pass through ws upgrade requests...
+            (.addLast "http-agg" (HttpObjectAggregator. max-content-length))
+            #_(.addLast "ws-compr" (WebSocketServerCompressionHandler.)) ; needs allowExtensions
+            (.addLast "ws" (WebSocketServerProtocolHandler.
+                             ; TODO [application] could specify subprotocol?
+                             ; https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#subprotocols
+                             ws-path nil true max-frame-size handshake-timeout))
+            ; TODO replace with functionality in main handler (e.g. via disk if big)
+            (.addLast "ws-agg" (WebSocketFrameAggregator. max-message-size))
+            (.addLast "ws-handler" (ws/handler opts))))))))

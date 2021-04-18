@@ -32,6 +32,7 @@
 #_ (s/exercise ::outgoing)
 #_ (s/exercise ::incoming) ; FIXME have another look at retag and multi-spec (sub-specs work)
 
+(s/def ::allow-origin string?)
 (s/def ::ws-path (s/and string? #(re-matches #"/.*" %))) ; TODO refine
 (s/def ::in-buffer pos-int?)
 (s/def ::out-buffer pos-int?)
@@ -47,7 +48,7 @@
                                ::disk-threshold
                                ::handshake-timeout ::max-frame-size ::max-message-size
                                ::max-chunk-size ::max-content-length]
-                :opt-un [::ws-path]))
+                :opt-un [::allow-origin ::ws-path]))
 
 (def defaults
   "Starts as `opts` and eventually becomes `channel-opts`.
@@ -76,6 +77,8 @@
    Close server by calling `close`.
 
    Specify websocket path with :ws-path opt. No ws if not specified.
+
+   Specify allow-origin value with :allow-origin opt. No CORS if not specified.
 
    Doesn't support Server Sent Events or long polling at present."
   ([port] (server! port {}))
@@ -115,7 +118,7 @@
                             (.channel NioServerSocketChannel)
                             ; FIXME specify ip ? InetAddress/getLocalHost ?
                             (.localAddress (InetSocketAddress. port))
-                            (.childHandler (server/pipeline ws-path
+                            (.childHandler (server/pipeline
                                              (assoc opts
                                                :channel-group channel-group
                                                :in in :out out
@@ -131,7 +134,7 @@
                       (close! in)
                       ; could/should add .sync; makes tests slower to exit
                       (-> loop-group .shutdownGracefully))
-             :port port :path ws-path :in in :out out
+             :port port :ws-path ws-path :in in :out out
              :clients (wrap-channel-group channel-group) :evict evict})
           (catch Exception e
             (close! out)
