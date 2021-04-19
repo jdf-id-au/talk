@@ -32,6 +32,7 @@
 #_ (s/exercise ::outgoing)
 #_ (s/exercise ::incoming) ; FIXME have another look at retag and multi-spec (sub-specs work)
 
+(s/def ::upload-approval? boolean?) ; i.e. does application need to approve uploads
 (s/def ::allow-origin string?)
 (s/def ::ws-path (s/and string? #(re-matches #"/.*" %))) ; TODO refine
 (s/def ::in-buffer pos-int?)
@@ -48,13 +49,13 @@
                                ::disk-threshold
                                ::handshake-timeout ::max-frame-size ::max-message-size
                                ::max-chunk-size ::max-content-length]
-                :opt-un [::allow-origin ::ws-path]))
+                :opt-un [::upload-approval? ::allow-origin ::ws-path]))
 
 (def defaults
   "Starts as `opts` and eventually becomes `channel-opts`.
    Need to add :ws-path if want websocket."
   {; Toplevel
-   :in-buffer 1 :out-buffer 1 :handler-timeout (* 5 1000)
+   :in-buffer 1 :out-buffer 1 :handler-timeout (* 5 1000) :approve-uploads? true
    ; Aggregation
    :disk-threshold DefaultHttpDataFactory/MINSIZE ; 16KiB
    ; WebSocket

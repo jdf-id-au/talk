@@ -223,7 +223,7 @@
    Send application's response to client with a backpressure-maintaning effect function.
    POST/PUT/PATCH requests are actually not fully read until application approves them with status 102;
    this status is intercepted here and causes channel read rather than being sent to client."
-  [{:keys [handler-timeout] :as opts} ^ChannelHandlerContext ctx]
+  [{:keys [handler-timeout upload-approval?] :as opts} ^ChannelHandlerContext ctx]
   (let [ch (.channel ctx)
         {:keys [await-approval?] :as wch} (wrap-channel ch)
         closed (chan)
@@ -249,7 +249,7 @@
               (log/debug "Out chan closed and so is" (ess ch) ". Why am I worrying?"))
 
             (if await-approval?
-              (if approved?
+              (if (or (not upload-approval?) approved?)
                 (do (dissoc wch :await-approval?)
                     (.read ctx))
                 ; Unceremoniously close channel (with status if browser capable of displaying).
