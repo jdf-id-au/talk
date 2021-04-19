@@ -47,7 +47,7 @@
   (ess [this] (str (.protocolVersion this) \  (.method this) \  (.uri this) \newline
                 (spp (into {} (.headers this)))))
   HttpContent
-  (ess [this])
+  (ess [this] (str (type this) \space (some-> this .content .readableBytes) \B))
   DefaultFullHttpResponse
   (ess [this] (str (-> this .protocolVersion .toString) \  (-> this .status .toString) \newline
                 (spp (into {} (.headers this)))
@@ -60,6 +60,7 @@
 ; Wrappers for Channel and ChannelGroup to pretend to be clojure maps
 
 (defn attribute-key [kw]
+  {:pre [(keyword? kw) (-> kw namespace nil?)]}
   (AttributeKey/valueOf (name kw)))
 
 (defn unsupported

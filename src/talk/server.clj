@@ -59,10 +59,11 @@
   (log/debug "Starting pipeline")
   (let [^CorsConfigBuilder ccb
         (if allow-origin (doto (CorsConfigBuilder/forOrigin allow-origin)
-                               (.allowedRequestHeaders (into-array ["content-type"])))
+                               (.allowedRequestHeaders (into-array ["content-type" "Content-Type"])))
                          (.disable (CorsConfigBuilder/forAnyOrigin)))]
     (proxy [ChannelInitializer] []
       (initChannel [^SocketChannel ch]
+        (log/debug "Initialising" (-> ch .id .asShortText))
         (doto (.pipeline ch)
           ; TODO could add handlers selectively according to need (from within the channel)
           (.addLast "http" (HttpServerCodec.
@@ -74,7 +75,7 @@
           #_(.addLast "http-compr" (HttpContentCompressor.))
           #_(.addLast "http-decompr" (HttpContentDecompressor.))
           (.addLast "streamer" (ChunkedWriteHandler.))
-          ; Safari doesn't seem to attempt CORS even when on different port; ff & chrome ok
+          ; Safari doesn't report attempting CORS even when on different port; ff & chrome do.
           (.addLast "cors" (CorsHandler. (.build ccb)))
           (.addLast "http-handler" (http/handler opts)))
         (when ws-path

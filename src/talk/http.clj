@@ -177,7 +177,7 @@
     (HttpUtil/setContentLength res (-> res .content .readableBytes))
     (let [cf (.writeAndFlush ctx res)]
       (if keep-alive?
-        ; HTTP does actually permit pipelined half-duplex, where consecutive requests yield consecutive responses (on same channel) https://stackoverflow.com/questions/23419469
+        ; HTTP does actually permit pipelining (~half-duplex?), where consecutive requests yield consecutive responses (on same channel) https://stackoverflow.com/questions/23419469
         ; The request-response backpressure from (.read ctx) here reduces the concurrency of request processing (i.e. doesn't start processing second request until first response is sent). Would need to profile with various workloads and core counts to work out if significant. Protects server at expense of single-channel client load time. Client is free to open another channel.
         (.addListener cf (reify ChannelFutureListener (operationComplete [_ _] (.read ctx))))
         (.addListener cf ChannelFutureListener/CLOSE)))))
@@ -225,7 +225,7 @@
    this status is intercepted here and causes channel read rather than being sent to client."
   [{:keys [handler-timeout] :as opts} ^ChannelHandlerContext ctx]
   (let [ch (.channel ctx)
-        wch (wrap-channel ch)
+        {:keys [await-approval?] :as wch} (wrap-channel ch)
         closed (chan)
         _ (async/close! closed)
         out-sub (:out-sub wch closed) ; default to closed chan if out-sub closed
@@ -234,9 +234,10 @@
     (go
       (try
         (let [{:keys [status headers cookies content] :as res}
-              ; Fetch application message published to this channel
+              ; Fetch application (or `short-ciruit`ed) message published to this channel
               (alt! out-sub ([v] v) (async/timeout handler-timeout) ::timeout)
-              ^HttpResponseStatus status (if (int? status) (HttpResponseStatus/valueOf status) status)]
+              ^HttpResponseStatus status (if (int? status) (HttpResponseStatus/valueOf status) status)
+              approved? (= status HttpResponseStatus/PROCESSING)] ; 102
           (case res
             ::timeout
             (do (log/error "Sent no http response on" (ess ch) "because of out chan timeout")
@@ -246,9 +247,15 @@
               (do (log/warn "Sent no http response on" (ess ch) "because out chan closed")
                   (emergency! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))
               (log/debug "Out chan closed and so is" (ess ch) ". Why am I worrying?"))
-            (case (.code status)
-              ; TODO should probably warn programmer if POST/PUT/PATCH without 102
-              102 (.read ctx)
+
+            (if await-approval?
+              (if approved?
+                (do (dissoc wch :await-approval?)
+                    (.read ctx))
+                ; Unceremoniously close channel (with status if browser capable of displaying).
+                ; Any pipleined requests will fail.
+                (do (log/info "Refused upload on" (ess ch))
+                    (emergency! ctx HttpResponseStatus/METHOD_NOT_ALLOWED)))
               (if (instance? java.io.File content)
                 ; TODO add support for other streaming sources (use protocols?)
                 ; Streaming:
@@ -441,30 +448,24 @@
           content-length (try (HttpUtil/getContentLength this) (catch NumberFormatException _))
           keep-alive? (HttpUtil/isKeepAlive this)
           method (-> this .method .toString str/lower-case keyword)
-          decoder
-          (case method
-            (:put :post :patch)
-            (case content-type
-              ("application/x-www-form-urlencoded" "multipart/form-data")
-              (try (HttpPostRequestDecoder. data-factory this)
-                   (catch HttpPostRequestDecoder$ErrorDataDecoderException e
-                     (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)
-                     ; put log second so return value is nil
-                     (log/warn "Error setting up POST decoder" e)))
-              (try (fake-decoder data-factory this)
-                   (catch Exception e
-                     (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)
-                     (log/warn "Error setting up decoder" e))))
-            ; Not accepting body for other methods
-            nil)]
+          body? (contains? #{:put :post :patch} method)
+          decoder (when body?
+                    (assoc wch :await-approval? true)
+                    (try (case content-type
+                           ("application/x-www-form-urlencoded" "multipart/form-data")
+                           (HttpPostRequestDecoder. data-factory this)
+                           (fake-decoder data-factory this))
+                         (catch Exception e
+                           (short-circuit out id HttpResponseStatus/UNPROCESSABLE_ENTITY)
+                           (log/warn "Error setting up decoder" e))))]
       (assoc wch :decoder decoder
                  :protocol protocol
                  :keep-alive? keep-alive?)
       (cond
-        ; https://stackoverflow.com/questions/12586881 Long weirdness
         ; FIXME vulnerable to reported < actual content length
-        (some-> content-length (> (:max-content-length wch max-content-length)))
+        (some-> content-length (> (:max-content-length wch max-content-length))) ; allow ch-specific
         (do (log/info "Too large")
+            (dissoc wch :await-approval?)
             (short-circuit out id HttpResponseStatus/REQUEST_ENTITY_TOO_LARGE))
 
         (.containsValue headers HttpHeaderNames/EXPECT HttpHeaderValues/CONTINUE true)
@@ -472,6 +473,9 @@
 
         (.containsValue headers HttpHeaderNames/UPGRADE HttpHeaderValues/WEBSOCKET true)
         (ask-to! ::ws-upgrade opts ctx this)
+
+        (and body? (not decoder))
+        true ; already short-circuited
 
         :else
         (ask-to! ::receive opts ctx this))))
