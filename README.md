@@ -6,7 +6,7 @@ Just enough of each.
 
 Exerts backpressure on both incoming and outgoing messages.
 
-Ougoing messages are validated to spec; application/caller may choose to use provided specs for incoming messages. Routing and most HTTP protocol semantics are left to the application/caller; try jdf/foundation for this.
+Ougoing messages are validated to spec; application/caller may choose to use provided specs for incoming messages. Routing and most HTTP protocol semantics are left to the application/caller; try [jdf/foundation](https://github.com/jdf-id-au/foundation/tree/ws-only) for this.
 
 Streams uploads to disk above threshold size.
 
