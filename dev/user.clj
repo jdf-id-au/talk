@@ -51,3 +51,32 @@
                        :content "hello"})
 
 #_ ((:close server))
+
+; Check behaviour of out-pub if one topic sub blocking
+
+(defn pub-test
+  "Check how one topic subscription can block others."
+  [bufsize]
+  (let [out (chan)
+        out-pub (if (zero? bufsize)
+                  (async/pub out first)
+                  (async/pub out first (fn [topic] (async/buffer bufsize))))
+        blocking-sub (chan)
+        blocked-sub (chan)]
+    (async/sub out-pub :blocking blocking-sub)
+    (async/sub out-pub :blocked blocked-sub)
+    ; no sub so doesn't block pub:
+    (doseq [n (range 5)] (async/put! out [:ignored n]))
+    ; blocking-sub blocks blocked-sub until consumed or buffered:
+    (doseq [n (range 5)] (async/put! out [:blocking n]))
+    (doseq [n (range 5)] (async/put! out [:blocked n]))
+    ; don't consume last three put!s on blocking-sub:
+    (dotimes [n 2] (async/take! blocking-sub tap>))
+    ; close!ing blocking-sub here unblocks blocked-sub
+    ;(async/close! blocking-sub)
+    (dotimes [n 5] (async/take! blocked-sub tap>))
+    blocking-sub))
+
+#_ (pub-test 0) ; blocks because 5 pub - 0 buffer - 1 on inner chan - 2 take > 0
+#_ (pub-test 1) ; blocks because 5 - 1 - 1 - 2 > 0
+#_ (pub-test 2) ; doesn't block because 5 - 2 - 1 - 2 = 0 left

@@ -95,7 +95,7 @@
          ; single threaded executor is for group actions
          channel-group (DefaultChannelGroup. GlobalEventExecutor/INSTANCE)
          in (chan in-buffer) ; messages to application from server's handlers
-         out (chan out-buffer ; messages from application
+         out (chan 1 ; messages from application
                (filter (fn [msg]
                          (if-let [explanation (s/explain-data ::outgoing msg)]
                            ; FIXME not sure this actually gets to the log
@@ -103,7 +103,7 @@
                            ; TODO bad ::http/response -> 500 or something (and change filter to map)
                            ;  but bad ::ws/... -> ??
                            msg))))
-         out-pub (async/pub out :channel) ; ...to server's handler for that netty channel
+         out-pub (async/pub out :channel (fn [topic] (async/buffer out-buffer))) ; ...to handler for that netty channel
          evict (fn [^ChannelId id]
                  (log/info "Trying to evict" (ess id))
                  (some-> channel-group (.find id) .close

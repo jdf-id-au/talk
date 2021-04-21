@@ -4,7 +4,7 @@
   (:require [clojure.tools.logging :as log]
             [clojure.core.async :as async :refer [go-loop chan <!! >!! <! >! put! close!]]
             [clojure.spec.alpha :as s]
-            [talk.util :refer [on wrap-channel]]
+            [talk.util :refer [on wrap-channel ess]]
             [talk.http :refer [->Connection]])
   (:import (io.netty.channel ChannelHandlerContext
                              SimpleChannelInboundHandler ChannelFutureListener ChannelHandler)
@@ -52,7 +52,6 @@
 (defn send! [^ChannelHandlerContext ctx out-sub msg]
   (when msg ; async/take! passes nil if out-sub closed
     (let [ch (.channel ctx)
-          id (.id ch)
           fr (try (frame msg)
                   (catch IllegalArgumentException e
                     (log/error "Unable to send this message type. Is it a record?" msg e)))
@@ -62,13 +61,11 @@
             (.addListener
               (reify ChannelFutureListener
                 (operationComplete [_ f]
-                  (when (.isCancelled f)
-                    (log/info "Cancelled message" msg "to" id))
-                  (when-not (.isSuccess f)
-                    (log/error "Send error for" msg "to" id (.cause f)))
-                  #_(log/info "ChannelFutureListener")
-                  (take!))))) ; facilitate backpressure
-        (take!))))) ; even when previous message unsendable
+                  (if-not (.isSuccess f)
+                    (do (.close ctx)
+                        (log/warn "Unable to send" msg "to" (ess ctx) (.cause f)))
+                    (take!)))))) ; backpressure
+        (take!))))) ; even if message invalid!
 
 (defn ^ChannelHandler handler
   "Forward incoming text messages to `in`.

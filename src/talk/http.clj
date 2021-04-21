@@ -141,7 +141,6 @@
   (let [ch (.channel ctx)
         wch (wrap-channel ch)
         id (.id ch)
-        cf (.closeFuture ch)
         out-sub (chan)]
     (try (.add channel-group ch)
          (async/sub out-pub id out-sub)
@@ -151,9 +150,10 @@
                     :addr (-> ch ^InetSocketAddress .remoteAddress HttpUtil/formatHostnameForHttp))
          (when-not (put! in (->Connection id :http))
            (log/error "Unable to report connection because in chan is closed"))
-         (.addListener cf
+         (.addListener (.closeFuture ch)
            (reify ChannelFutureListener
              (operationComplete [_ _]
+               (async/close! out-sub) ; Explicitly close out-sub to ensure out-pub is not blocked.
                (when-not (put! in (->Connection id nil))
                  (log/error "Unable to report disconnection because in chan is closed")))))
          (catch Exception e
@@ -175,12 +175,18 @@
     (HttpUtil/setKeepAlive res keep-alive?)
     ; May need to review when enabling HttpContentEncoder etc. What about HTTP/2?
     (HttpUtil/setContentLength res (-> res .content .readableBytes))
-    (let [cf (.writeAndFlush ctx res)]
-      (if keep-alive?
-        ; HTTP does actually permit pipelining (~half-duplex?), where consecutive requests yield consecutive responses (on same channel) https://stackoverflow.com/questions/23419469
-        ; The request-response backpressure from (.read ctx) here reduces the concurrency of request processing (i.e. doesn't start processing second request until first response is sent). Would need to profile with various workloads and core counts to work out if significant. Protects server at expense of single-channel client load time. Client is free to open another channel.
-        (.addListener cf (reify ChannelFutureListener (operationComplete [_ _] (.read ctx))))
-        (.addListener cf ChannelFutureListener/CLOSE)))))
+    ; HTTP does actually permit pipelining (~half-duplex?), where consecutive requests yield consecutive responses (on same channel) https://stackoverflow.com/questions/23419469
+    ; The request-response backpressure from (.read ctx) here reduces the concurrency of request processing (i.e. doesn't start processing second request until first response is sent). Would need to profile with various workloads and core counts to work out if significant. Protects server at expense of single-channel client load time. Client is free to open another channel.
+    (-> (.writeAndFlush ctx res)
+        (.addListener
+          (reify ChannelFutureListener
+            (operationComplete [_ f]
+              (if-not (.isSuccess f)
+                (do (.close ctx)
+                    (log/warn "Unable to send http response to" (ess ctx) (.cause f)))
+                (if keep-alive?
+                  (.read ctx) ; request-response backpressure
+                  (.close ctx)))))))))
 
 (defn stream!
   "Send HTTP response streaming a file, and manage keep-alive and content-length.
@@ -201,18 +207,38 @@
         ; NB breaks if no os support for zero-copy; might not work with *netty's* ssl
     (HttpUtil/setKeepAlive res keep-alive?)
     (HttpUtil/setContentLength res len)
-    (.writeAndFlush ctx res) ; initial line and header
-    (let [cf (.writeAndFlush ctx region)] ; encoded into several HttpContents?
-      (.addListener cf
-        (reify ChannelFutureListener
-          (operationComplete [_ _]
-            (.close raf)
-            ; Omission of LastHttpContent causes inability to reuse channel. Safari and wget just close channel and try again, firefox and chrome (ERR_INVALID_HTTP_RESPONSE) get upset and never finish loading page.
-            (.writeAndFlush ctx (LastHttpContent/EMPTY_LAST_CONTENT))
-            ; request-response backpressure!
-            (when keep-alive? (.read ctx))
-            (log/debug "Finished streaming" (ess res)
-              "on" (ess ctx) (when-not keep-alive? ", about to close because not keep-alive"))))))))
+    (-> (.writeAndFlush ctx res) ; initial line and header
+        (.addListener
+          (reify ChannelFutureListener
+            (operationComplete [_ f]
+              (if-not (.isSuccess f)
+                (do (.close ctx) ; closes `out-sub` in `track-channel`
+                    (log/warn "Unable to start stream of" file "to" (ess ctx) (.cause f)))
+                (-> (.writeAndFlush ctx region) ; encoded into several HttpContents?
+                    (.addListener
+                      (reify ChannelFutureListener
+                        (operationComplete [_ f]
+                          (.close raf)
+                          (if-not (.isSuccess f)
+                            (do (.close ctx)
+                                (log/warn "Unable to progress stream of" file
+                                  "to" (ess ctx) (.cause f)))
+                            ; Omission of LastHttpContent causes inability to reuse channel. Safari and wget just close channel and try again, firefox and chrome (ERR_INVALID_HTTP_RESPONSE) get upset and never finish loading page.
+                            (-> (.writeAndFlush ctx (LastHttpContent/EMPTY_LAST_CONTENT))
+                                (.addListener
+                                  (reify ChannelFutureListener
+                                    (operationComplete [_ f]
+                                      (if-not (.isSuccess f)
+                                        (do (.close ctx)
+                                            (log/warn "Unable to complete stream of" file
+                                              "to" (ess ctx) (.cause f)))
+                                        (do
+                                          (log/debug "Finished streaming" (ess res) "on" (ess ctx)
+                                            (when-not keep-alive?
+                                              ", about to close because not keep-alive"))
+                                          (if keep-alive?
+                                            (.read ctx) ; request-response backpressure
+                                            (.close ctx))))))))))))))))))))
 
 (defn emergency!
   [ctx ^HttpResponseStatus status]
