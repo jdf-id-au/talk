@@ -153,7 +153,7 @@
          (.addListener (.closeFuture ch)
            (reify ChannelFutureListener
              (operationComplete [_ f]
-               (log/debug "Closing out-sub" f (.cause f))
+               (log/debug "Channel" id "is closing" f (.cause f))
                (async/close! out-sub) ; Explicitly close out-sub to ensure out-pub is not blocked.
                (when-not (put! in (->Connection id nil))
                  (log/error "Unable to report disconnection because in chan is closed")))))
@@ -178,6 +178,7 @@
     (HttpUtil/setContentLength res (-> res .content .readableBytes))
     ; HTTP does actually permit pipelining (~half-duplex?), where consecutive requests yield consecutive responses (on same channel) https://stackoverflow.com/questions/23419469
     ; The request-response backpressure from (.read ctx) here reduces the concurrency of request processing (i.e. doesn't start processing second request until first response is sent). Would need to profile with various workloads and core counts to work out if significant. Protects server at expense of single-channel client load time. Client is free to open another channel.
+    (log/debug "WRITING" (ess res))
     (-> (.writeAndFlush ctx res)
         (.addListener
           (reify ChannelFutureListener
@@ -185,9 +186,14 @@
               (if-not (.isSuccess f)
                 (do (.close ctx)
                     (log/warn "Unable to send http response to" (ess ctx) (.cause f)))
-                (if keep-alive?
-                  (.read ctx) ; request-response backpressure
-                  (.close ctx)))))))))
+                (do (log/debug "Finished response to" (ess ctx)
+                      (when-not keep-alive?
+                        ", about to close because not keep-alive"))
+                    (if keep-alive?
+                      (.read ctx) ; request-response backpressure
+                      (do (log/info "Closing channel" (ess ctx))
+                          (.close ctx)))))))))))
+                ; Default*Full*HttpResponse so no EmptyLastHttpContent needed.
 
 (defn stream!
   "Send HTTP response streaming a file, and manage keep-alive and content-length.
@@ -239,7 +245,8 @@
                                               ", about to close because not keep-alive"))
                                           (if keep-alive?
                                             (.read ctx) ; request-response backpressure
-                                            (.close ctx))))))))))))))))))))
+                                            (do (log/info "Closing channel" (ess ctx))
+                                                (.close ctx)))))))))))))))))))))
 
 (defn emergency!
   [ctx ^HttpResponseStatus status]
@@ -252,21 +259,24 @@
    this status is intercepted here and causes channel read rather than being sent to client."
   [{:keys [handler-timeout upload-approval?] :as opts} ^ChannelHandlerContext ctx]
   (let [ch (.channel ctx)
-        {:keys [await-approval?] :as wch} (wrap-channel ch)
+        ;{:keys [await-approval?] :as wch} (wrap-channel ch)
         closed (chan)
-        _ (async/close! closed)
-        out-sub (:out-sub wch closed) ; default to closed chan if out-sub closed
-        ^HttpVersion protocol (:protocol wch HttpVersion/HTTP_1_1)
-        keep-alive? (:keep-alive? wch)]
-    (log/debug "Trying to respond")
+        _ (async/close! closed)]
+        ;out-sub (:out-sub wch closed)] ; default to closed chan if out-sub closed
+        ;^HttpVersion protocol (:protocol wch HttpVersion/HTTP_1_1)]
+        ;keep-alive? (:keep-alive? wch)]
+    (log/debug "RESPONDER")
     (go
       (try
-        (let [{:keys [status headers cookies content] :as res}
+        (let [{:keys [await-approval? keep-alive? protocol out-sub] :as wch} (wrap-channel ch)
+              protocol (or protocol HttpVersion/HTTP_1_1)
+              out-sub (or out-sub closed)
+              {:keys [status headers cookies content] :as res}
               ; Fetch application (or `short-ciruit`ed) message published to this channel
               (alt! out-sub ([v] v) (async/timeout handler-timeout) ::timeout)
               ^HttpResponseStatus status (if (int? status) (HttpResponseStatus/valueOf status) status)
               approved? (= status HttpResponseStatus/PROCESSING)] ; 102
-          (log/debug "With" res)
+          (log/debug "RESPONDER alt!" res (when await-approval? "AWAITING APPROVAL"))
           (case res
             ::timeout
             (do (log/error "Sent no http response on" (ess ch) "because of out chan timeout")
@@ -277,9 +287,10 @@
                   (emergency! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))
               (log/debug "Out chan closed and so is" (ess ch) ". Why am I worrying?"))
 
-            (if await-approval?
+            (if await-approval? ; 102 is slipping through! FIXME!! await-approval? not resetting properly
               (if (or (not upload-approval?) approved?)
-                (do (dissoc wch :await-approval?)
+                (do (log/debug "APPROVED")
+                    (dissoc wch :await-approval?)
                     (.read ctx))
                 ; Unceremoniously close channel (with status if browser capable of displaying).
                 ; Any pipleined requests will fail.
