@@ -187,7 +187,8 @@
                 (do (.close ctx)
                     (log/warn "Unable to send http response to" (ess ctx) (.cause f)))
                 (do (log/debug "Finished response to" (ess ctx)
-                      (when-not keep-alive?
+                      (if keep-alive?
+                        ", keeping alive"
                         ", about to close because not keep-alive"))
                     (if keep-alive?
                       (.read ctx) ; request-response backpressure
@@ -241,7 +242,8 @@
                                               "to" (ess ctx) (.cause f)))
                                         (do
                                           (log/debug "Finished streaming" (ess res) "on" (ess ctx)
-                                            (when-not keep-alive?
+                                            (if keep-alive?
+                                              ", keeping alive"
                                               ", about to close because not keep-alive"))
                                           (if keep-alive?
                                             (.read ctx) ; request-response backpressure
@@ -259,24 +261,42 @@
    this status is intercepted here and causes channel read rather than being sent to client."
   [{:keys [handler-timeout upload-approval?] :as opts} ^ChannelHandlerContext ctx]
   (let [ch (.channel ctx)
-        ;{:keys [await-approval?] :as wch} (wrap-channel ch)
+        wch (wrap-channel ch)
         closed (chan)
         _ (async/close! closed)]
-        ;out-sub (:out-sub wch closed)] ; default to closed chan if out-sub closed
-        ;^HttpVersion protocol (:protocol wch HttpVersion/HTTP_1_1)]
-        ;keep-alive? (:keep-alive? wch)]
-    (log/debug "RESPONDER")
     (go
       (try
-        (let [{:keys [await-approval? keep-alive? protocol out-sub] :as wch} (wrap-channel ch)
-              protocol (or protocol HttpVersion/HTTP_1_1)
-              out-sub (or out-sub closed)
+        (let [protocol (:protocol wch HttpVersion/HTTP_1_1)
+              out-sub (:out-sub wch closed)
               {:keys [status headers cookies content] :as res}
               ; Fetch application (or `short-ciruit`ed) message published to this channel
               (alt! out-sub ([v] v) (async/timeout handler-timeout) ::timeout)
               ^HttpResponseStatus status (if (int? status) (HttpResponseStatus/valueOf status) status)
-              approved? (= status HttpResponseStatus/PROCESSING)] ; 102
-          (log/debug "RESPONDER alt!" res (when await-approval? "AWAITING APPROVAL"))
+              approved? (= status HttpResponseStatus/PROCESSING) ; 102
+              respond
+              (fn []
+                (if (instance? java.io.File content)
+                  ; TODO add support for other streaming sources (use protocols?)
+                  ; Streaming:
+                  (let [res (DefaultHttpResponse. protocol status)
+                        hdrs (.headers res)]
+                    (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
+                    (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
+                      (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
+                    (stream! ctx (:keep-alive? wch) res content))
+                  ; Non-streaming:
+                  (let [buf (condp #(%1 %2) content
+                                        string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
+                                        nil? Unpooled/EMPTY_BUFFER
+                                        bytes? (Unpooled/copiedBuffer ^bytes content))
+                        res (DefaultFullHttpResponse. protocol status ^ByteBuf buf)
+                        hdrs (.headers res)]
+                    (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
+                    ; TODO need to support repeated headers (other than Set-Cookie ?)
+                    (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
+                      (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
+                    (respond! ctx (:keep-alive? wch) res))))]
+
           (case res
             ::timeout
             (do (log/error "Sent no http response on" (ess ch) "because of out chan timeout")
@@ -287,36 +307,24 @@
                   (emergency! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))
               (log/debug "Out chan closed and so is" (ess ch) ". Why am I worrying?"))
 
-            (if await-approval? ; 102 is slipping through! FIXME!! await-approval? not resetting properly
-              (if (or (not upload-approval?) approved?)
-                (do (log/debug "APPROVED")
-                    (dissoc wch :await-approval?)
-                    (.read ctx))
-                ; Unceremoniously close channel (with status if browser capable of displaying).
-                ; Any pipleined requests will fail.
-                (do (log/info "Refused upload on" (ess ch))
-                    (emergency! ctx HttpResponseStatus/METHOD_NOT_ALLOWED)))
-              (if (instance? java.io.File content)
-                ; TODO add support for other streaming sources (use protocols?)
-                ; Streaming:
-                (let [res (DefaultHttpResponse. protocol status)
-                      hdrs (.headers res)]
-                  (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
-                  (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
-                    (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
-                  (stream! ctx keep-alive? res content))
-                ; Non-streaming:
-                (let [buf (condp #(%1 %2) content
-                           string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
-                           nil? Unpooled/EMPTY_BUFFER
-                           bytes? (Unpooled/copiedBuffer ^bytes content))
-                      res (DefaultFullHttpResponse. protocol status ^ByteBuf buf)
-                      hdrs (.headers res)]
-                  (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
-                  ; TODO need to support repeated headers (other than Set-Cookie ?)
-                  (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
-                    (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
-                  (respond! ctx keep-alive? res))))))
+            (if approved?
+              (if upload-approval?
+                (if (:await-approval? wch)
+                  (do (dissoc wch :await-approval?)
+                      (.read ctx))
+                  (do (log/error "Unexpected approval on" (ess ch))
+                      (.read ctx)))
+                (do (log/debug "Unnecessary approval on" (ess ch))
+                    (.read ctx)))
+              (if upload-approval?
+                (if (:await-approval? wch)
+                  (do ; Unceremoniously close channel (with status if browser capable of displaying).
+                      ; Any pipleined requests will fail.
+                      (log/info "Refused upload on" (ess ch))
+                      (emergency! ctx HttpResponseStatus/METHOD_NOT_ALLOWED))
+                  (respond))
+                (respond)))))
+
         (catch Exception e
           (log/error "Error in http response handler" e)
           (emergency! ctx HttpResponseStatus/INTERNAL_SERVER_ERROR))))))
@@ -478,9 +486,10 @@
       "Please remove HttpObjectAggregator from pipeline." (ess this)))
 
   HttpRequest
-  (read! [this ctx {:keys [data-factory out max-content-length] :as opts}]
+  (read! [this ctx {:keys [data-factory out max-content-length upload-approval?] :as opts}]
     (let [ch (.channel ctx)
           wch (wrap-channel ch)
+          ; TODO could have overriding :upload-approval? added to trusted channels
           id (.id ch)
           protocol (.protocolVersion this)
           headers (.headers this)
@@ -490,7 +499,7 @@
           method (-> this .method .toString str/lower-case keyword)
           body? (contains? #{:put :post :patch} method)
           decoder (when body?
-                    (assoc wch :await-approval? true)
+                    (when upload-approval? (assoc wch :await-approval? true))
                     (try (case content-type
                            ("application/x-www-form-urlencoded" "multipart/form-data")
                            (HttpPostRequestDecoder. data-factory this)
@@ -551,8 +560,7 @@
                (log/error "Tried to write to destroyed decoder" e)
                (short-circuit out id HttpResponseStatus/SERVICE_UNAVAILABLE)))
         ; Ignore EmptyLastHttpContent following requests with methods which we don't allow to have body.
-        (do (.read ctx) false) ; needed for CORS which given orphan EmptyLastHttpContent from OPTIONS Requset I think
-        #_(log/debug "Dropped" this "because no decoder. Does method support body?")))))
+        (do (.read ctx) false))))) ; needed for CORS which given orphan EmptyLastHttpContent from OPTIONS Requset I think
 
 (defn ^ChannelHandler handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."

@@ -55,7 +55,7 @@
   "Starts as `opts` and eventually becomes `channel-opts`.
    Need to add :ws-path if want websocket."
   {; Toplevel
-   :in-buffer 1 :out-buffer 1 :handler-timeout (* 5 1000) :approve-uploads? true
+   :in-buffer 1 :out-buffer 1 :handler-timeout (* 5 1000) :upload-approval? true
    ; Aggregation
    :disk-threshold DefaultHttpDataFactory/MINSIZE ; 16KiB
    ; WebSocket
