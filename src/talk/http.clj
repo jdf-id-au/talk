@@ -152,7 +152,8 @@
            (log/error "Unable to report connection because in chan is closed"))
          (.addListener (.closeFuture ch)
            (reify ChannelFutureListener
-             (operationComplete [_ _]
+             (operationComplete [_ f]
+               (log/debug "Closing out-sub" f (.cause f))
                (async/close! out-sub) ; Explicitly close out-sub to ensure out-pub is not blocked.
                (when-not (put! in (->Connection id nil))
                  (log/error "Unable to report disconnection because in chan is closed")))))
@@ -257,6 +258,7 @@
         out-sub (:out-sub wch closed) ; default to closed chan if out-sub closed
         ^HttpVersion protocol (:protocol wch HttpVersion/HTTP_1_1)
         keep-alive? (:keep-alive? wch)]
+    (log/debug "Trying to respond")
     (go
       (try
         (let [{:keys [status headers cookies content] :as res}
@@ -264,6 +266,7 @@
               (alt! out-sub ([v] v) (async/timeout handler-timeout) ::timeout)
               ^HttpResponseStatus status (if (int? status) (HttpResponseStatus/valueOf status) status)
               approved? (= status HttpResponseStatus/PROCESSING)] ; 102
+          (log/debug "With" res)
           (case res
             ::timeout
             (do (log/error "Sent no http response on" (ess ch) "because of out chan timeout")

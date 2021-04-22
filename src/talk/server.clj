@@ -59,7 +59,7 @@
   (log/debug "Starting pipeline")
   (let [^CorsConfigBuilder ccb
         (if allow-origin (doto (CorsConfigBuilder/forOrigin allow-origin)
-                               (.allowedRequestHeaders (into-array ["content-type" "Content-Type"])))
+                               (.allowedRequestHeaders (into-array ["content-type"])))
                          (.disable (CorsConfigBuilder/forAnyOrigin)))]
     (proxy [ChannelInitializer] []
       (initChannel [^SocketChannel ch]

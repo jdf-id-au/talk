@@ -125,7 +125,7 @@
     (count [_]
       (.size channel-group))
     Seqable
-    (seq [_]
+    (seq [_] ; AbstractMethodError? https://clojure.atlassian.net/browse/CLJ-1255 ?
       (seq (map (fn [^Channel ch] (MapEntry. (.id ch) (wrap-channel ch))) channel-group)))
     ILookup
     (valAt [_ k]
@@ -141,7 +141,8 @@
       ; NB Only to allow assoc-in and update-in to work!
       (if (.find channel-group k)
         this
-        (unsupported "This is a wrapped io.netty.channel.group.ChannelGroup. Can't assoc new.")))))
+        (log/warn "Ignore assoc to wrapped io.netty.channel.group.ChannelGroup. This can happen if referenced channel is no longer in group.")
+        #_(unsupported "This is a wrapped io.netty.channel.group.ChannelGroup. Can't assoc new.")))))
     ;IObj
     ; (withMeta [_ _] (unsupported)))))
     ;IFn ; holy crap too many methods

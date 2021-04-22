@@ -15,7 +15,7 @@ Streams uploads to disk above threshold size.
 ## Usage
 
 ```clojure
-(require '[clojure.core.async :refer [<!! >!!])
+(require '[clojure.core.async :refer [<!! >!!]])
 (require '[talk.api :as talk])
 (require '[talk.ws :refer [->Text]])
 
