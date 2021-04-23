@@ -178,7 +178,6 @@
     (HttpUtil/setContentLength res (-> res .content .readableBytes))
     ; HTTP does actually permit pipelining (~half-duplex?), where consecutive requests yield consecutive responses (on same channel) https://stackoverflow.com/questions/23419469
     ; The request-response backpressure from (.read ctx) here reduces the concurrency of request processing (i.e. doesn't start processing second request until first response is sent). Would need to profile with various workloads and core counts to work out if significant. Protects server at expense of single-channel client load time. Client is free to open another channel.
-    (log/debug "WRITING" (ess res))
     (-> (.writeAndFlush ctx res)
         (.addListener
           (reify ChannelFutureListener
@@ -305,7 +304,7 @@
             (if (.isOpen ch)
               (do (log/warn "Sent no http response on" (ess ch) "because out chan closed")
                   (emergency! ctx HttpResponseStatus/SERVICE_UNAVAILABLE))
-              (log/debug "Out chan closed and so is" (ess ch) ". Why am I worrying?"))
+              #_(log/debug "Out chan closed and so is" (ess ch) ". Why am I worrying?"))
 
             (if approved?
               (if upload-approval?

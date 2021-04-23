@@ -32,9 +32,7 @@
 #_ (s/exercise ::outgoing)
 #_ (s/exercise ::incoming) ; FIXME have another look at retag and multi-spec (sub-specs work)
 
-(s/def ::upload-approval? boolean?) ; i.e. does application need to approve uploads
-(s/def ::allow-origin string?)
-(s/def ::ws-path (s/and string? #(re-matches #"/.*" %))) ; TODO refine
+(s/def ::port (s/int-in 80 65536))
 (s/def ::in-buffer pos-int?)
 (s/def ::out-buffer pos-int?)
 (s/def ::timeout (s/int-in 10 10001))
@@ -45,7 +43,11 @@
 (s/def ::max-message-size (s/int-in (* 32 1024) (* 1024 1024 1024))) ; TODO cover with tests....
 (s/def ::max-chunk-size (s/int-in 1024 (* 1024 1024)))
 (s/def ::max-content-length (s/int-in (* 32 1024) (* 1024 1024 1024))) ; but netty uses signed 32bit int!
-(s/def ::opts (s/keys :req-un [::in-buffer ::out-buffer ::handler-timeout
+(s/def ::upload-approval? boolean?) ; i.e. does application need to approve uploads
+(s/def ::allow-origin string?)
+(s/def ::ws-path (s/and string? #(re-matches #"/.*" %))) ; TODO refine
+(s/def ::opts (s/keys :req-un [::port
+                               ::in-buffer ::out-buffer ::handler-timeout
                                ::disk-threshold
                                ::handshake-timeout ::max-frame-size ::max-message-size
                                ::max-chunk-size ::max-content-length]
@@ -85,7 +87,7 @@
   ([port] (server! port {}))
   ([port opts]
    (log/debug "Starting server with" opts)
-   (let [merged-opts (merge defaults opts)
+   (let [merged-opts (merge defaults opts {:port port})
          {:keys [ws-path in-buffer out-buffer] :as opts}
          (if-let [explanation (s/explain-data ::opts merged-opts)]
            (throw (ex-info "Invalid opts" {:defaults defaults :opts opts :explanation explanation}))
