@@ -146,7 +146,7 @@
             (.read ctx))
         ; Max frame length exceeded:
         CorruptedWebSocketFrameException
-        (do (log/warn (type cause) (.getMessage cause))
+        (do (log/warn (type cause) (.getMessage cause) cause)
             (.read ctx))
         ; else
         (do (log/error "Error in websocket handler" cause)

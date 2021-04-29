@@ -7,7 +7,8 @@
             [talk.util :refer [retag ess wrap-channel-group]]
             [hato.websocket :as hws]
             [clojure.spec.alpha :as s]
-            [clojure.spec.gen.alpha :as gen])
+            [clojure.spec.gen.alpha :as gen]
+            [clojure.string :as str])
   (:import (io.netty.bootstrap ServerBootstrap)
            (io.netty.channel.nio NioEventLoopGroup)
            (io.netty.channel.group DefaultChannelGroup)
@@ -16,9 +17,9 @@
            (java.net InetSocketAddress)
            (io.netty.handler.codec.http.multipart DefaultHttpDataFactory)
            (io.netty.handler.codec.http HttpObjectDecoder)
-           (io.netty.channel ChannelFutureListener DefaultChannelId Channel ChannelId)
+           (io.netty.channel ChannelFutureListener ChannelId)
            (java.nio ByteBuffer)
-           (java.io ByteArrayOutputStream)
+           (java.io ByteArrayOutputStream ByteArrayInputStream)
            (java.nio.channels Channels))
   (:refer-clojure :exclude [deliver]))
 
@@ -173,6 +174,22 @@
   ByteArrayOutputStream
   (deliver [this] (.toByteArray this)))
 
+(defprotocol Splittable
+  (split [this]))
+(extend-protocol Splittable
+  (Class/forName "[B") ; only one possible, has to be first!
+  (split [this]
+    (assert (> 0 (alength this)))
+    (let [bais (ByteArrayInputStream. this)]
+      (for [frag (.readNBytes bais 64)
+            :while (> (alength frag) 0)]
+        frag)))
+  String
+  (split [this] #_(re-seq #".{1,64}" this) ; slightly faster
+    (log/debug this)
+    (assert (not (str/blank? this)))
+    (eduction (partition-all 64) (map str/join) this)))
+
 ; TODO move hato dep to dev-only; just have client adaptor
 (defn client!
   [uri]
@@ -203,8 +220,11 @@
                  (log/error "Websocket error" error))})
         _ (go-loop []
             (if-let [msg (<! out)]
-              (do #_(log/debug "about to send" (count msg) "characters from client")
-                (hws/send! ws msg)
-                (recur))
+              (do (loop [[f & r] (split msg)]
+                    (hws/send! ws f {:last? (not (boolean r))})
+                    (when r (recur r)))
+                  ; Doesn't fragment binary messages; strangely large text works.
+                  #_(hws/send! ws msg)
+                  (recur))
               (log/info "Stopped sending messages")))]
     {:ws ws :in in :out out}))
