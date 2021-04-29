@@ -44,8 +44,6 @@
       (.getBytes content 0 data)
       (->Binary id data))))
 
-(def DEFAULT-CHUNK-SIZE 8192) ; TODO could add to opts and pass through, or reuse max-frame-size?
-
 ; WebSocketChunkedInput only makes ContinuationWebSocketFrames, so needed to make-first.
 (defprotocol Frame
   (get-bytes [this])
@@ -58,7 +56,7 @@
   (get-bytes [{:keys [data]}] data)
   (make-first [_ last? rsv buf] (BinaryWebSocketFrame. last? rsv buf)))
 
-(defn frame [o]
+(defn frame [{:keys [frame-size]} o]
   (let [bs (get-bytes o)
         buf (Unpooled/wrappedBuffer ^bytes bs)]
     (reify ChunkedInput
@@ -67,21 +65,21 @@
       (readChunk [_ ^ByteBufAllocator _]
         (let [remaining (.readableBytes buf)
               first? (zero? (.readerIndex buf))
-              last? (<= remaining DEFAULT-CHUNK-SIZE)
-              rs (.readRetainedSlice buf (if last? remaining DEFAULT-CHUNK-SIZE))]
+              last? (<= remaining frame-size)
+              rs (.readRetainedSlice buf (if last? remaining frame-size))]
           (if first?
             (make-first o last? 0 rs)
             (ContinuationWebSocketFrame. last? 0 rs))))
       (length [_] (alength bs))
       (progress [_] (.readerIndex buf)))))
 
-(defn send! [^ChannelHandlerContext ctx out-sub msg]
+(defn send! [opts ^ChannelHandlerContext ctx out-sub msg]
   (when msg ; async/take! passes nil if out-sub closed
     (let [ch (.channel ctx)
-          fr (try (frame msg)
+          fr (try (frame opts msg)
                   (catch IllegalArgumentException e
                     (log/error "Unable to send this message type. Is it a record?" msg e)))
-          take! #(async/take! out-sub (partial send! ctx out-sub))]
+          take! #(async/take! out-sub (partial send! opts ctx out-sub))]
       (if fr
         (-> (.writeAndFlush ch fr)
             (.addListener
@@ -118,7 +116,7 @@
             (log/error "Unable to report connection upgrade because in chan is closed"))
           ; first take!, see send! for subsequent
           (if out-sub
-            (async/take! out-sub (partial send! ctx out-sub))
+            (async/take! out-sub (partial send! opts ctx out-sub))
             (log/error "No out-sub channel found")))))
     (channelRead0 [^ChannelHandlerContext ctx ^WebSocketFrame frame]
       ; Should already be off from http handler channelActive:

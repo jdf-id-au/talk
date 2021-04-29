@@ -41,6 +41,7 @@
 (s/def ::handshake-timeout ::timeout)
 (s/def ::max-frame-size (s/int-in (* 32 1024) (* 1024 1024)))
 (s/def ::max-message-size (s/int-in (* 32 1024) (* 1024 1024 1024))) ; TODO cover with tests....
+(s/def ::frame-size (s/int-in (* 1 1024) (* 1024 1024)))
 (s/def ::max-chunk-size (s/int-in 1024 (* 1024 1024)))
 (s/def ::max-content-length (s/int-in (* 32 1024) (* 1024 1024 1024))) ; but netty uses signed 32bit int!
 (s/def ::upload-approval? boolean?) ; i.e. does application need to approve uploads
@@ -64,6 +65,7 @@
    :handshake-timeout (* 5 1000) ; netty default not public
    :max-frame-size (* 64 1024)
    :max-message-size (* 1024 1024)
+   :frame-size (* 8 1024)
    ; HTTP
    :max-chunk-size HttpObjectDecoder/DEFAULT_MAX_CHUNK_SIZE
    :max-content-length (* 1 1024 1024)}) ; limited to int range by netty!
