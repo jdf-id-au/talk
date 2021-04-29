@@ -20,7 +20,7 @@
            (io.netty.util ReferenceCountUtil)
            (talk.http Connection Request Attribute File Trail)
            (talk.ws Text Binary)
-           (io.netty.handler.codec.http.cors CorsHandler CorsConfig CorsConfigBuilder$ConstantValueGenerator CorsConfigBuilder)))
+           (io.netty.handler.codec.http.cors CorsHandler CorsConfigBuilder)))
 
 (s/def ::channel (s/with-gen #(instance? ChannelId %)
                    #(gen/fmap (fn [_] (DefaultChannelId/newInstance)) (s/gen nil?))))

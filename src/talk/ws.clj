@@ -10,9 +10,12 @@
                              SimpleChannelInboundHandler ChannelFutureListener ChannelHandler)
            (io.netty.handler.codec.http.websocketx
              TextWebSocketFrame CorruptedWebSocketFrameException WebSocketFrame
-             WebSocketServerProtocolHandler$HandshakeComplete BinaryWebSocketFrame)
+             WebSocketServerProtocolHandler$HandshakeComplete BinaryWebSocketFrame WebSocketChunkedInput ContinuationWebSocketFrame)
            (io.netty.handler.codec TooLongFrameException)
-           (io.netty.buffer Unpooled)))
+           (io.netty.buffer Unpooled ByteBuf ByteBufAllocator)
+           (java.io ByteArrayInputStream)
+           (io.netty.handler.stream ChunkedStream ChunkedInput)
+           (io.netty.util CharsetUtil)))
 
 (s/def :plain/text string?)
 (s/def :plain/data bytes?)
@@ -41,13 +44,36 @@
       (.getBytes content 0 data)
       (->Binary id data))))
 
+(def DEFAULT-CHUNK-SIZE 8192) ; TODO could add to opts and pass through, or reuse max-frame-size?
+
+; WebSocketChunkedInput only makes ContinuationWebSocketFrames, so needed to make-first.
 (defprotocol Frame
-  (frame [this]))
+  (get-bytes [this])
+  (make-first [this last? rsv buf]))
 (extend-protocol Frame
   Text
-  (frame [this] (TextWebSocketFrame. ^String (:text this)))
+  (get-bytes [{:keys [^String text]}] (.getBytes text CharsetUtil/UTF_8))
+  (make-first [_ last? rsv buf] (TextWebSocketFrame. ^boolean last? ^int rsv ^ByteBuf buf))
   Binary
-  (frame [this] (BinaryWebSocketFrame. (Unpooled/wrappedBuffer ^bytes (:data this)))))
+  (get-bytes [{:keys [data]}] data)
+  (make-first [_ last? rsv buf] (BinaryWebSocketFrame. last? rsv buf)))
+
+(defn frame [o]
+  (let [bs (get-bytes o)
+        buf (Unpooled/wrappedBuffer ^bytes bs)]
+    (reify ChunkedInput
+      (isEndOfInput [_] (not (.isReadable buf)))
+      (close [_] (.release buf)) ; is actually called
+      (readChunk [_ ^ByteBufAllocator _]
+        (let [remaining (.readableBytes buf)
+              first? (zero? (.readerIndex buf))
+              last? (<= remaining DEFAULT-CHUNK-SIZE)
+              rs (.readRetainedSlice buf (if last? remaining DEFAULT-CHUNK-SIZE))]
+          (if first?
+            (make-first o last? 0 rs)
+            (ContinuationWebSocketFrame. last? 0 rs))))
+      (length [_] (alength bs))
+      (progress [_] (.readerIndex buf)))))
 
 (defn send! [^ChannelHandlerContext ctx out-sub msg]
   (when msg ; async/take! passes nil if out-sub closed
