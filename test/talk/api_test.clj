@@ -132,8 +132,8 @@
         "Long text WS roundtrip works.")
       ; FIXME Java 11 WS client doesn't fragment large outgoing binary messages
       ; Strangely large text works.
-      #_(is (= (seq binary) (seq (when (async/put! (ws :out) binary) (read!!))))
-          "Binary WS roundtrip works."))
+      (is (= (seq binary) (seq (when (async/put! (ws :out) binary) (read!!))))
+        "Binary WS roundtrip works."))
     (testing "clients registry"
       (is (nil? (-> ws-id evict deref))
         "(Evicting websocket client)")

@@ -179,16 +179,20 @@
 (extend-protocol Splittable
   (Class/forName "[B") ; only one possible, has to be first!
   (split [this]
-    (assert (> 0 (alength this)))
-    (let [bais (ByteArrayInputStream. this)]
-      (for [frag (.readNBytes bais 64)
-            :while (> (alength frag) 0)]
-        frag)))
+    (if (zero? (alength this))
+      (log/warn "Tried to send empty byte array.")
+      (let [bais (ByteArrayInputStream. this)]
+        (loop [acc []]
+          (let [frag (.readNBytes bais 64)]
+            (if (zero? (alength frag))
+              acc
+              (recur (conj acc frag))))))))
   String
   (split [this] #_(re-seq #".{1,64}" this) ; slightly faster
-    (log/debug this)
     (assert (not (str/blank? this)))
-    (eduction (partition-all 64) (map str/join) this)))
+    (if (str/blank? this)
+      (log/warn "Tried to send blank string.")
+      (eduction (partition-all 64) (map str/join) this))))
 
 ; TODO move hato dep to dev-only; just have client adaptor
 (defn client!
@@ -221,8 +225,8 @@
         _ (go-loop []
             (if-let [msg (<! out)]
               (do (loop [[f & r] (split msg)]
-                    (hws/send! ws f {:last? (not (boolean r))})
-                    (when r (recur r)))
+                    (hws/send! ws f {:last? (empty? r)})
+                    (when (seq r) (recur r)))
                   ; Doesn't fragment binary messages; strangely large text works.
                   #_(hws/send! ws msg)
                   (recur))
