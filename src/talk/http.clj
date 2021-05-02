@@ -20,7 +20,7 @@
                                         HttpRequest HttpContent LastHttpContent HttpObject HttpVersion
                                         HttpHeaderValues FullHttpRequest)
            (io.netty.util CharsetUtil ReferenceCountUtil)
-           (io.netty.handler.codec.http.cookie ServerCookieDecoder ServerCookieEncoder Cookie)
+           (io.netty.handler.codec.http.cookie ServerCookieDecoder ServerCookieEncoder Cookie DefaultCookie)
            (io.netty.handler.codec.http.multipart HttpPostRequestDecoder
                                                   InterfaceHttpData
                                                   DefaultHttpDataFactory
@@ -33,7 +33,8 @@
            (java.net InetSocketAddress)
            (java.nio.charset Charset)
            (io.netty.channel.group ChannelGroup)
-           (java.nio ByteBuffer)))
+           (java.nio ByteBuffer)
+           (clojure.lang MapEntry)))
 
 ; Spec and records
 
@@ -253,6 +254,15 @@
   [ctx ^HttpResponseStatus status]
   (respond! ctx true (DefaultFullHttpResponse. HttpVersion/HTTP_1_1 status Unpooled/EMPTY_BUFFER)))
 
+(defprotocol Cookieable
+  (encode [this]))
+
+(extend-protocol Cookieable
+  MapEntry
+  (encode [[k v]] (.encode ServerCookieEncoder/STRICT k v))
+  DefaultCookie
+  (encode [this] (.encode ServerCookieEncoder/STRICT this)))
+
 (defn responder
   "Asynchronously wait for application's (or `short-circuit`ed) response, or timeout.
    Send application's response to client with a backpressure-maintaning effect function.
@@ -280,8 +290,7 @@
                   (let [res (DefaultHttpResponse. protocol status)
                         hdrs (.headers res)]
                     (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
-                    (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable ; TODO expiry?
-                      (mapv #(.encode ServerCookieEncoder/STRICT (first %) (second %)) cookies))
+                    (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable (mapv encode cookies))
                     (stream! ctx (:keep-alive? wch) res content))
                   ; Non-streaming:
                   (let [buf (condp #(%1 %2) content
@@ -350,8 +359,7 @@
             :cookie ; TODO omit if empty
             (update m :cookies into
               (for [^Cookie c (.decode ServerCookieDecoder/STRICT v)]
-                ; TODO could look at max-age, etc...
-                [(.name c) (.value c)]))
+                [(.name c) c]))
             (update m :headers
               (fn [hs]
                 (if-let [old (get hs lck)]

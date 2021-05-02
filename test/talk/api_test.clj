@@ -65,10 +65,7 @@
         #_#_read!! #(alt!! (ws :in) ([v] v) (async/timeout 100) nil)
         read!! #(<!! (ws :in)) ; just hangs REPL mid-test (still closable)
         short-text "hello"
-        ; FIXME
-        ; Can't actually get anywhere near (* 1024 1024); presumably protocol overhead.
-        ; Interestingly binary over max-frame-size throws CorruptedWebSocketFrameException
-        ; but oversized text doesn't?!
+        ; FIXME Can't actually get anywhere near (* 1024 1024); presumably protocol overhead.
         long-text (apply str (repeatedly (* 512 1024) #(char (rand-int 255))))
         binary (byte-array (repeatedly (* 64 1024) #(rand-int 255)))]
     (is (contains? clients ws-id)
@@ -130,10 +127,8 @@
         "Short text WS roundtrip works.")
       (is (= long-text (when (async/put! (ws :out) long-text) (read!!)))
         "Long text WS roundtrip works.")
-      ; FIXME Java 11 WS client doesn't fragment large outgoing binary messages
-      ; Strangely large text works.
       (is (= (seq binary) (seq (when (async/put! (ws :out) binary) (read!!))))
-        "Binary WS roundtrip works."))
+        "Binary WS roundtrip works (providing client fragments large messages)."))
     (testing "clients registry"
       (is (nil? (-> ws-id evict deref))
         "(Evicting websocket client)")

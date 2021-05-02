@@ -196,6 +196,8 @@
 
 ; TODO move hato dep to dev-only; just have client adaptor
 (defn client!
+  "Use Java 11 Http client via gnarroway/hato. Aggregate incoming frames and split outgoing messages.
+   Note that web browsers don't tend to split outgoing messages. Watch WebSocketStream API proposal."
   [uri]
   (let [raw-in (chan)
         in (chan)
