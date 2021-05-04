@@ -347,7 +347,7 @@
 ; Requests
 
 (defn parse-headers
-  "Return map containing maps of headers and cookies."
+  "Return map containing maps of :headers (lower-case keyword keys) and :cookies (string keys)."
   [headers]
   (some->> headers .iteratorAsString iterator-seq
     (reduce
