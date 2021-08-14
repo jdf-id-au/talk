@@ -265,7 +265,7 @@
 
 (defn responder
   "Asynchronously wait for application's (or `short-circuit`ed) response, or timeout.
-   Send application's response to client with a backpressure-maintaning effect function.
+   Send application's response to client with a backpressure-maintaining effect function.
    POST/PUT/PATCH requests are actually not fully read until application approves them with status 102;
    this status is intercepted here and causes channel read rather than being sent to client."
   [{:keys [handler-timeout upload-approval?] :as opts} ^ChannelHandlerContext ctx]
@@ -327,7 +327,7 @@
               (if upload-approval?
                 (if (:await-approval? wch)
                   (do ; Unceremoniously close channel (with status if browser capable of displaying).
-                      ; Any pipleined requests will fail.
+                      ; Any pipelined requests will fail.
                       (log/info "Refused upload on" (ess ch))
                       (emergency! ctx HttpResponseStatus/METHOD_NOT_ALLOWED))
                   (respond))
@@ -586,7 +586,9 @@
               id (-> ctx .channel .id)
               respond? (or decoder-error (read! obj ctx opts))]
           (when decoder-error
-            (log/warn "Decoder failed" decoder-error) ; e.g. TLS (need reverse proxy to handle)
+            (if (str/starts-with? (.getMessage decoder-error) "invalid version format")
+              (log/error "Decoder failed, possibly TLS not being handled upstream?" decoder-error)
+              (log/warn "Decoder failed" decoder-error))
             (short-circuit out id HttpResponseStatus/BAD_REQUEST))
           (when respond? (responder opts ctx)))
         #_(log/debug "End of http/handler."))
