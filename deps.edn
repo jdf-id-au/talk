@@ -1,15 +1,15 @@
-{:deps {org.clojure/core.async {:mvn/version "1.3.618"}
+{:deps {org.clojure/core.async {:mvn/version "1.4.627"}
         org.clojure/tools.logging {:mvn/version "1.1.0"
                                    :exclusions [org.clojure/clojure]}
 
-        io.netty/netty-transport {:mvn/version "4.1.66.Final"}
-        io.netty/netty-transport-native-epoll {:mvn/version "4.1.66.Final"}
-        io.netty/netty-codec {:mvn/version "4.1.66.Final"}
-        io.netty/netty-codec-http {:mvn/version "4.1.66.Final"}
-        io.netty/netty-handler {:mvn/version "4.1.66.Final"}
-        io.netty/netty-handler-proxy {:mvn/version "4.1.66.Final"}
-        io.netty/netty-resolver {:mvn/version "4.1.66.Final"}
-        io.netty/netty-resolver-dns {:mvn/version "4.1.66.Final"}
+        io.netty/netty-transport {:mvn/version "4.1.70.Final"}
+        io.netty/netty-transport-native-epoll {:mvn/version "4.1.70.Final"}
+        io.netty/netty-codec {:mvn/version "4.1.70.Final"}
+        io.netty/netty-codec-http {:mvn/version "4.1.70.Final"}
+        io.netty/netty-handler {:mvn/version "4.1.70.Final"}
+        io.netty/netty-handler-proxy {:mvn/version "4.1.70.Final"}
+        io.netty/netty-resolver {:mvn/version "4.1.70.Final"}
+        io.netty/netty-resolver-dns {:mvn/version "4.1.70.Final"}
 
         hato/hato {:mvn/version "0.8.2"}}
  :paths ["src" "classes"]
