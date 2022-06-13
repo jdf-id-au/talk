@@ -581,7 +581,7 @@
     (set! (. DiskAttribute baseDirectory) nil)
     (proxy [SimpleChannelInboundHandler] [HttpObject]
       (channelRead0 [^ChannelHandlerContext ctx ^HttpObject obj]
-        (some->> obj ess (log/debug "Received on" (ess ctx)))
+        (some->> obj ess (log/debug "Received on" (ess ctx))) ; TODO could log/info selectively
         (let [decoder-error (-> obj .decoderResult .cause)
               id (-> ctx .channel .id)
               respond? (or decoder-error (read! obj ctx opts))]

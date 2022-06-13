@@ -123,6 +123,7 @@
       #_(-> ctx .channel .config (.setAutoRead false))
       (let [ch (.channel ctx)
             id (.id ch)]
+        (log/debug "channelRead0" frame)
         (if-let [cnv (try (unframe frame id) ; Should already be aggregated
                           (catch IllegalArgumentException e
                             (log/info "Dropped incoming websocket message because unrecognised type" e)))]

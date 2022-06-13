@@ -30,6 +30,7 @@
 ; REPL interactive demo
 
 #_ (require '[talk.api :as talk])
+#_ (require '[talk.ws :refer [->Text]])
 #_ (def server (talk/server! 8080
                  {:ws-path "/ws"
                   :handler-timeout (* 10 1000)}))
