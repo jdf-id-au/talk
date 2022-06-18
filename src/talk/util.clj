@@ -103,7 +103,8 @@
 
 (defn wrap-channel-group
   "Make io.netty.channel.group.ChannelGroup look a bit like a clojure map of `ChannelId` -> `Channel`.
-   Each `Channel` is wrapped with `wrap-channel`."
+   Each `Channel` is wrapped with `wrap-channel`.
+   NB Can't seq properly yet!!, use `(iterator-seq (.iterator x))` to get seq of raw channels..."
   ; It's already a java.util.Set<io.netty.channel.Channel>.
   ; Don't want to bring in clj-commons/potemkin for def-map-type!
   [^ChannelGroup channel-group]
@@ -111,12 +112,6 @@
   ;; IPersistentCollection IPersistentMap Counted Seqable ILookup Associative IObj IFn
   ;; Important functions:
   ;; get assoc dissoc keys meta with-meta
-  #_(proxy [java.util.IdentityHashMap] []
-    (containsKey [k] (boolean (.find channel-group k)))
-    (entrySet [] (java.util.Set/of (into-array (map #(java.util.Map/entry (.id %) (wrap-channel %)) channel-group))))
-    (get [k] (wrap-channel (.find channel-group k)))
-    (keySet [] (java.util.Set/of (into-array ChannelId (map #(.id %) channel-group))))
-    (values [] (java.util.Set/of (into-array (map wrap-channel channel-group)))))
   (reify
     ;IPersistentCollection ; extends Seqable
     ;(count [_] (count (channel-group)))
@@ -136,10 +131,10 @@
     ;;   (map (fn [^Channel ch]
     ;;          (log/debug "Trying to create MapEntry for" (.id ch))
     ;;          (MapEntry. (.id ch) (wrap-channel ch))) channel-group))
-    ;; Iterable
-    ;; (forEach [_ action])
-    ;; (iterator [_])
-    ;; (spliterator [_])
+    Iterable ;; NB these pretend it's just a Set
+    ;; (forEach [_ action] (.forEach channel-group action))
+    (iterator [_] (.iterator channel-group))
+    ;;(spliterator [_] (.spliterator channel-group))
     ILookup
     (valAt [_ k]
       (some-> (.find channel-group k) wrap-channel))
