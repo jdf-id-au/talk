@@ -107,10 +107,16 @@
   ; It's already a java.util.Set<io.netty.channel.Channel>.
   ; Don't want to bring in clj-commons/potemkin for def-map-type!
   [^ChannelGroup channel-group]
-  ; Clojure interfaces which might be needed:
-  ; IPersistentCollection IPersistentMap Counted Seqable ILookup Associative IObj IFn
-  ; Important functions:
-  ; get assoc dissoc keys meta with-meta
+  ;; Clojure interfaces which might be needed:
+  ;; IPersistentCollection IPersistentMap Counted Seqable ILookup Associative IObj IFn
+  ;; Important functions:
+  ;; get assoc dissoc keys meta with-meta
+  #_(proxy [java.util.IdentityHashMap] []
+    (containsKey [k] (boolean (.find channel-group k)))
+    (entrySet [] (java.util.Set/of (into-array (map #(java.util.Map/entry (.id %) (wrap-channel %)) channel-group))))
+    (get [k] (wrap-channel (.find channel-group k)))
+    (keySet [] (java.util.Set/of (into-array ChannelId (map #(.id %) channel-group))))
+    (values [] (java.util.Set/of (into-array (map wrap-channel channel-group)))))
   (reify
     ;IPersistentCollection ; extends Seqable
     ;(count [_] (count (channel-group)))
@@ -124,9 +130,16 @@
     Counted
     (count [_]
       (.size channel-group))
-    Seqable
-    (seq [_] ; AbstractMethodError? https://clojure.atlassian.net/browse/CLJ-1255 ?
-      (seq (map (fn [^Channel ch] (MapEntry. (.id ch) (wrap-channel ch))) channel-group)))
+    ;; Seqable
+    ;; (seq [_] ; AbstractMethodError? https://clojure.atlassian.net/browse/CLJ-1255 ? but lets (keys x) work
+    ;;   ;; Also, seqs cache values so ?not suitable for mutable, wrapped channels?
+    ;;   (map (fn [^Channel ch]
+    ;;          (log/debug "Trying to create MapEntry for" (.id ch))
+    ;;          (MapEntry. (.id ch) (wrap-channel ch))) channel-group))
+    ;; Iterable
+    ;; (forEach [_ action])
+    ;; (iterator [_])
+    ;; (spliterator [_])
     ILookup
     (valAt [_ k]
       (some-> (.find channel-group k) wrap-channel))
@@ -136,7 +149,7 @@
     (containsKey [_ k]
       (boolean (.find channel-group k)))
     (entryAt [_ k]
-      (some-> (.find channel-group k) wrap-channel))
+      (MapEntry. k (some-> (.find channel-group k) wrap-channel)))
     (assoc [this k v]
       ; NB Only to allow assoc-in and update-in to work!
       (if (.find channel-group k)
