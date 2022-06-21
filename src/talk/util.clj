@@ -69,7 +69,8 @@
 
 (defn wrap-channel
   "Make io.netty.channel.Channel look a bit like a clojure map of the Channel's AttributeMap.
-   Only supports plain keyword keys. Doesn't distinguish between Attribute with nil value and absent attribute."
+   Only supports plain keyword keys. Doesn't distinguish between Attribute with nil value and absent attribute.
+  NB Can't seq properly yet."
   [^Channel channel]
   (reify
     ILookup
@@ -101,10 +102,16 @@
     ; Counted:
     (count [_] (unsupported "This is a wrapped io.netty.channel.Channel. No count."))))
 
+(defn channels
+  "Workaround for inability to reify seq (see `wrap-channel-group`).
+   Returns map of ChannelId -> Channel (not wrapped)."
+  [{:keys [clients] :as server}]
+  (->> clients .iterator iterator-seq (map (fn [ch] [(.id ch) ch])) (into {})))
+
 (defn wrap-channel-group
   "Make io.netty.channel.group.ChannelGroup look a bit like a clojure map of `ChannelId` -> `Channel`.
    Each `Channel` is wrapped with `wrap-channel`.
-   NB Can't seq properly yet!!, use `(iterator-seq (.iterator x))` to get seq of raw channels..."
+   NB Can't seq properly yet, see `channels` instead."
   ; It's already a java.util.Set<io.netty.channel.Channel>.
   ; Don't want to bring in clj-commons/potemkin for def-map-type!
   [^ChannelGroup channel-group]
@@ -131,9 +138,9 @@
     ;;   (map (fn [^Channel ch]
     ;;          (log/debug "Trying to create MapEntry for" (.id ch))
     ;;          (MapEntry. (.id ch) (wrap-channel ch))) channel-group))
-    Iterable ;; NB these pretend it's just a Set
+    Iterable
     ;; (forEach [_ action] (.forEach channel-group action))
-    (iterator [_] (.iterator channel-group))
+    (iterator [_] (.iterator channel-group)) ; NB returns channels, not wrapped!
     ;;(spliterator [_] (.spliterator channel-group))
     ILookup
     (valAt [_ k]
