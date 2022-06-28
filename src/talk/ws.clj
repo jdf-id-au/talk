@@ -87,7 +87,11 @@
                 (operationComplete [_ f]
                   (if-not (.isSuccess f)
                     (do (.close ctx)
-                        (log/warn "Unable to send" msg "to" (ess ctx) (.cause f)))
+                        (log/warn "Unable to send" msg "to" (ess ctx)
+                          (let [th (.cause f)]
+                            (if (and (instance? java.io.IOException th) (= (.getMessage th) "Broken pipe"))
+                              "Broken pipe"
+                              th))))
                     (take!)))))) ; backpressure
         (take!))))) ; even if message invalid!
 
