@@ -12,7 +12,7 @@
              HttpPostRequestDecoder$NotEnoughDataDecoderException
              HttpPostRequestDecoder$EndOfDataDecoderException FileUpload)))
 
-; Copy-past from jdf/comfort to avoid dep
+;; Copy-paste from jdf/comfort to avoid dep
 
 (defn retag
   "spec convenience"
@@ -70,7 +70,7 @@
 (defn wrap-channel
   "Make io.netty.channel.Channel look a bit like a clojure map of the Channel's AttributeMap.
    Only supports plain keyword keys. Doesn't distinguish between Attribute with nil value and absent attribute.
-  NB Can't seq properly yet."
+   NB Can't seq properly yet."
   [^Channel channel]
   (reify
     ILookup
@@ -133,11 +133,11 @@
     (count [_]
       (.size channel-group))
     ;; Seqable
-    ;; (seq [_] ; AbstractMethodError? https://clojure.atlassian.net/browse/CLJ-1255 ? but lets (keys x) work
-    ;;   ;; Also, seqs cache values so ?not suitable for mutable, wrapped channels?
-    ;;   (map (fn [^Channel ch]
-    ;;          (log/debug "Trying to create MapEntry for" (.id ch))
-    ;;          (MapEntry. (.id ch) (wrap-channel ch))) channel-group))
+    (seq [_] ; AbstractMethodError? https://clojure.atlassian.net/browse/CLJ-1255 ? but lets (keys x) work
+      ;; Also, seqs cache values so ?not suitable for mutable, wrapped channels?
+      (map (fn [^Channel ch]
+             #_(log/debug "Trying to create MapEntry for" (.id ch))
+             (MapEntry. (.id ch) (wrap-channel ch))) channel-group))
     Iterable
     ;; (forEach [_ action] (.forEach channel-group action))
     (iterator [_] (.iterator channel-group)) ; NB returns channels, not wrapped!

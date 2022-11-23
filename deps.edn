@@ -13,7 +13,7 @@
         io.netty/netty-resolver {:mvn/version "4.1.72.Final"}
         io.netty/netty-resolver-dns {:mvn/version "4.1.72.Final"}
 
-        hato/hato {:mvn/version "0.8.2"}}
+        hato/hato {:mvn/version "0.9.0"}}
  :paths ["src" "classes"]
  :aliases
  {:dev {:extra-deps {org.clojure/clojure {:mvn/version "1.11.1"}
