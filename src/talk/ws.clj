@@ -121,7 +121,10 @@
           ; first take!, see send! for subsequent
           (if out-sub
             (async/take! out-sub (partial send! opts ctx out-sub))
-            (log/error "No out-sub channel found")))))
+            (log/error "No out-sub channel found"))
+          ;; Became necessary for Netty 4.1.73, presumably relating to:
+          ;; https://github.com/netty/netty/pull/11966/files#
+          (.read ctx))))
     (channelRead0 [^ChannelHandlerContext ctx ^WebSocketFrame frame]
       ; Should already be off from http handler channelActive:
       #_(-> ctx .channel .config (.setAutoRead false))

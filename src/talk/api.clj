@@ -228,6 +228,7 @@
             (if-let [msg (<! out)]
               (do (loop [[f & r] (split msg)]
                     (hws/send! ws f {:last? (empty? r)})
+                    ;;(log/debug "Client successfully sent" f)
                     (when (seq r) (recur r)))
                   ; Doesn't fragment binary messages; strangely large text works.
                   #_(hws/send! ws msg)

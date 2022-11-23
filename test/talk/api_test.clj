@@ -50,6 +50,7 @@
 
 (defn echo-application [{:keys [in out] :as server}]
   (go-loop [msg (<! in)]
+    ;;(log/debug "Received" msg)
     (if-let [res (some-> msg echo)]
       (when-not (>! out res)
         (log/error "failed to write" res "because port closed")))
@@ -123,7 +124,9 @@
         "Patch with binary works."))
       ; TODO test CORS
     (testing "ws"
-      (is (= short-text (when (async/put! (ws :out) short-text) (read!!)))
+      (is (= short-text (when (async/put! (ws :out) short-text)
+                          ;;(log/debug "Managed to put!" short-text)
+                          (read!!)))
         "Short text WS roundtrip works.")
       (is (= long-text (when (async/put! (ws :out) long-text) (read!!)))
         "Long text WS roundtrip works.")
