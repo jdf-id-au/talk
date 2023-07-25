@@ -66,8 +66,10 @@
         #_#_read!! #(alt!! (ws :in) ([v] v) (async/timeout 100) nil)
         read!! #(<!! (ws :in)) ; just hangs REPL mid-test (still closable)
         short-text "hello"
-        ; FIXME Can't actually get anywhere near (* 1024 1024); presumably protocol overhead.
-        long-text (apply str (repeatedly (* 512 1024) #(char (rand-int 255))))
+        ;; FIXME Can't actually get anywhere near (* 1024 1024); presumably protocol overhead.
+        ;; even (* (+ 512 256) 1024) TooLongFrameException content length exceeded 1048576 bytes
+        long-text (apply str (repeatedly (* (+ 512 128) 1024) #(char (rand-int 255))))
+        ;; This did work at (* 1024 1024) though:
         binary (byte-array (repeatedly (* 64 1024) #(rand-int 255)))]
     (is (contains? clients ws-id)
       "Clients registry contains websocket client channel.")
