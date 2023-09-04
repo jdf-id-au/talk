@@ -99,7 +99,7 @@
 (s/def ::Request (s/keys :req-un [:talk.server/channel ::protocol ::meta ::method ::headers ::cookies
                                   ::uri ::path ::query ::parameters]))
 (defrecord Request [channel protocol meta method headers cookies uri path parameters]
-  Object (toString [r] (str \< (-> method name str/upper-case) \  uri " on channel " (on r) \>)))
+  Object (toString [r] (str \< (-> method name str/upper-case) \space uri " on channel " (on r) \>)))
 
 ; file? explains whether value will be bytes or File
 ; keep charset as java.nio.Charset because convenient for decoding
@@ -278,7 +278,7 @@
         (let [protocol (:protocol wch HttpVersion/HTTP_1_1)
               out-sub (:out-sub wch closed)
               {:keys [status headers cookies content] :as res}
-              ; Fetch application (or `short-ciruit`ed) message published to this channel
+              ; Fetch application (or `short-circuit`ed) message published to this channel
               (alt! out-sub ([v] v) (async/timeout handler-timeout) ::timeout)
               ^HttpResponseStatus status (if (int? status) (HttpResponseStatus/valueOf status) status)
               approved? (= status HttpResponseStatus/PROCESSING) ; 102
