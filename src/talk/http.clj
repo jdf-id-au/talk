@@ -357,11 +357,10 @@
         (let [lck (-> k str/lower-case keyword)]
           (case lck
             :cookie
-            ;; NB list of pairs; doesn't assume unique keys
+            ;; NB doesn't assume unique keys
             ;; https://stackoverflow.com/q/4056306/780743
-            (update m :cookies (fnil into [])
-              (for [^Cookie c (.decode ServerCookieDecoder/STRICT v)]
-                [(.name c) c]))
+            (update m :cookies (fnil (partial merge-with into) {}) 
+              (group-by #(.name %) (.decode ServerCookieDecoder/STRICT v)))
             (update m :headers
               (fn [hs]
                 (if-let [old (get hs lck)]
