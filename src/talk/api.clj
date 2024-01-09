@@ -36,7 +36,7 @@
 (s/def ::port (s/int-in 80 65536))
 (s/def ::in-buffer pos-int?)
 (s/def ::out-buffer pos-int?)
-(s/def ::timeout (s/int-in 10 10001))
+(s/def ::timeout (s/int-in 10 60001))
 (s/def ::handler-timeout ::timeout)
 (s/def ::disk-threshold (s/int-in 1024 (* 1024 1024)))
 (s/def ::handshake-timeout ::timeout)
@@ -107,7 +107,7 @@
                            (log/error "Invalid outgoing message" msg explanation)
                            ; TODO bad ::http/response -> 500 or something (and change filter to map)
                            ;  but bad ::ws/... -> ??
-                           msg))))
+                           msg)))) ;; TODO chan ex-handler
          out-pub (async/pub out :channel (fn [topic] (async/buffer out-buffer))) ; ...to handler for that netty channel
          evict (fn [^ChannelId id]
                  (log/info "Trying to evict" (ess id))
