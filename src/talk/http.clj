@@ -173,7 +173,8 @@
   (let [status (.status res)
         ; TODO do any other codes merit keep-alive?
         ok-or-continue? (contains? #{HttpResponseStatus/OK HttpResponseStatus/CONTINUE} status)
-        keep-alive? (and keep-alive? ok-or-continue?)]
+        ;; Ugh `boolean` was necessary to avoid NPE when null because something calls booleanValue on it
+        keep-alive? (and (boolean keep-alive?) ok-or-continue?)]
     (HttpUtil/setKeepAlive res keep-alive?)
     ; May need to review when enabling HttpContentEncoder etc. What about HTTP/2?
     (HttpUtil/setContentLength res (-> res .content .readableBytes))
