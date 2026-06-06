@@ -293,6 +293,7 @@
                     (doseq [[k v] headers] (.set hdrs (-> k name str/lower-case) v))
                     (.set hdrs HttpHeaderNames/SET_COOKIE ^Iterable (mapv encode cookies))
                     (stream! ctx (:keep-alive? wch) res content))
+                  ;; TODO 2025-10-05 22:01:48 SSE (incl turning off out-sub timeout)
                   ; Non-streaming:
                   (let [buf (condp #(%1 %2) content
                                         string? (Unpooled/copiedBuffer ^String content CharsetUtil/UTF_8)
