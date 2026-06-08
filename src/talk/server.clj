@@ -34,8 +34,8 @@
 (defmethod message-type Text [_] ::ws/Text)
 (defmethod message-type Binary [_] ::ws/Binary)
 
-(defn ^ChannelHandler tracker
-  [{:keys [] :as opts}]
+(defn tracker
+  ^ChannelHandler [{:keys [] :as opts}]
   (proxy [SimpleChannelInboundHandler] [HttpObject]
     (channelActive [^ChannelHandlerContext ctx]
         (http/track-channel opts ctx)

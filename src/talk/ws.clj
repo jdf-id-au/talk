@@ -95,7 +95,7 @@
                     (take!)))))) ; backpressure
         (take!))))) ; even if message invalid!
 
-(defn ^ChannelHandler handler
+(defn handler
   "Forward incoming text messages to `in`.
    Send outgoing messages from `out-sub`.
    Both asynchronously and with backpressure."
@@ -104,7 +104,7 @@
   ; Limited by needing to fit in (half of available) memory because of WebSocketFrameAggregator.
   ; Benefit is application not needing to worry about manual memory management...
   ; Contemplate repurposing or reimplementing simpler MixedAttribute to aggregate to memory vs disk depending on size (and turning off WSFA)
-  [{:keys [in] :as opts}]
+  ^ChannelHandler [{:keys [in] :as opts}]
   (log/debug "Starting ws handler")
   (proxy [SimpleChannelInboundHandler] [WebSocketFrame]
     (userEventTriggered [^ChannelHandlerContext ctx evt]
@@ -139,7 +139,7 @@
           ; https://clojure.org/guides/core_async_go
           ; put! will throw AssertionError if >1024 requests queue up
           ; Netty prefers async everywhere, which is why I'm not using >!!
-          (when-not (put! in cnv #(if % (.read ctx)))
+          (when-not (put! in cnv #(when % (.read ctx)))
             (log/error "Dropped incoming websocket message because in chan is closed" cnv)
             ; TODO do something about closed in chan? Shutdown?
             (.close ctx))

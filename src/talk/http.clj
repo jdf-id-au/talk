@@ -233,7 +233,7 @@
                                 (log/warn "Unable to progress stream of" file
                                   "to" (ess ctx) (.cause f)))
                             ; Omission of LastHttpContent causes inability to reuse channel. Safari and wget just close channel and try again, firefox and chrome (ERR_INVALID_HTTP_RESPONSE) get upset and never finish loading page.
-                            (-> (.writeAndFlush ctx (LastHttpContent/EMPTY_LAST_CONTENT))
+                            (-> (.writeAndFlush ctx LastHttpContent/EMPTY_LAST_CONTENT)
                                 (.addListener
                                   (reify ChannelFutureListener
                                     (operationComplete [_ f]
@@ -572,10 +572,10 @@
         ; Ignore EmptyLastHttpContent following requests with methods which we don't allow to have body.
         (do (.read ctx) false))))) ; needed for CORS which given orphan EmptyLastHttpContent from OPTIONS Requset I think
 
-(defn ^ChannelHandler handler
+(defn handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."
   ; TODO read about HTTP/2 https://developers.google.com/web/fundamentals/performance/http2
-  [{:keys [disk-threshold out] :as opts}]
+  ^ChannelHandler [{:keys [disk-threshold out] :as opts}]
   #_(log/debug "Starting http handler")
   (let [opts (assoc opts :data-factory (DefaultHttpDataFactory. ^long disk-threshold))]
     (set! (. DiskFileUpload deleteOnExitTemporaryFile) true) ; same as default
