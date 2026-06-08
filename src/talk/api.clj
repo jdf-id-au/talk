@@ -46,14 +46,13 @@
 (s/def ::max-chunk-size (s/int-in 1024 (* 1024 1024)))
 (s/def ::max-content-length (s/int-in (* 32 1024) (* 1024 1024 1024))) ; but netty uses signed 32bit int!
 (s/def ::upload-approval? boolean?) ; i.e. does application need to approve uploads
-(s/def ::allow-origin string?)
 (s/def ::ws-path (s/and string? #(re-matches #"/.*" %))) ; TODO refine
 (s/def ::opts (s/keys :req-un [::port
                                ::in-buffer ::out-buffer ::handler-timeout
                                ::disk-threshold
                                ::handshake-timeout ::max-frame-size ::max-message-size
                                ::max-chunk-size ::max-content-length]
-                :opt-un [::upload-approval? ::allow-origin ::ws-path]))
+                :opt-un [::upload-approval? ::ws-path]))
 
 (def defaults
   "Starts as `opts` and eventually becomes `channel-opts`.
@@ -83,8 +82,6 @@
    Close server by calling `close`.
 
    Specify websocket path with :ws-path opt. No ws if not specified.
-
-   Specify allow-origin value with :allow-origin opt. No CORS if not specified.
 
    Doesn't support Server Sent Events or long polling at present."
   ([port] (server! port {}))
