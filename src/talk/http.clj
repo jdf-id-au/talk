@@ -569,8 +569,8 @@
              (catch IllegalStateException e
                (log/error "Tried to write to destroyed decoder" e)
                (short-circuit out id HttpResponseStatus/SERVICE_UNAVAILABLE)))
-        ; Ignore EmptyLastHttpContent following requests with methods which we don't allow to have body.
-        (do (.read ctx) false))))) ; needed for CORS which given orphan EmptyLastHttpContent from OPTIONS Requset I think
+        ; FIXME 2026-06-08 21:51:26 don't ...Ignore EmptyLastHttpContent following requests with methods which we don't allow to have body.
+        #_(do (.read ctx) false)#_(.read ctx))))) ; needed for CORS which given orphan EmptyLastHttpContent from OPTIONS Request I think
 
 (defn handler
   "Parse HTTP requests and forward to `in` with backpressure. Respond asynchronously from `out-sub`."

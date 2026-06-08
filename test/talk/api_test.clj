@@ -124,7 +124,6 @@
                              :content-type :octet-stream
                              :body binary})))
         "Patch with binary works."))
-      ; TODO test CORS
     (testing "ws"
       (is (= short-text (when (async/put! (ws :out) short-text)
                           ;;(log/debug "Managed to put!" short-text)
