@@ -100,7 +100,6 @@
          out (chan 1 ; messages from application
                (filter (fn [msg]
                          (if-let [explanation (s/explain-data ::outgoing msg)]
-                           ; FIXME not sure this actually gets to the log
                            (log/error "Invalid outgoing message" msg explanation)
                            ; TODO bad ::http/response -> 500 or something (and change filter to map)
                            ;  but bad ::ws/... -> ??

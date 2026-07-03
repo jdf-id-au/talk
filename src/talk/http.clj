@@ -109,7 +109,7 @@
   (toString [r]
     (str "<Attribute " \" name \"
       (if file? (str " written to disk at " (.getPath ^java.io.File value))
-                (str \= \" (.decode charset (ByteBuffer/wrap value)) \"))
+          (str \= \" (String. value charset) \"))
       " from " (on r) \>)))
 
 (s/def ::File (s/keys :req-un [:talk.server/channel ::name ::filename ::charset ::content-type ::transfer-encoding ::file? ::value]))
