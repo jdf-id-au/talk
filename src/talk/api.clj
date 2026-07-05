@@ -83,6 +83,8 @@
 
    Specify websocket path with :ws-path opt. No ws if not specified.
 
+   Doesn't support dynamic manipulation of pipeline.
+
    Doesn't support Server Sent Events or long polling at present."
   ([port] (server! port {}))
   ([port opts]
